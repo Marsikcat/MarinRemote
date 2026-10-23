@@ -7,7 +7,7 @@ import asyncio
 
 from .. import protocol as P
 from ..codes import fingerprint
-from ..net import LineReader, path_info, read_stream_header, remote_key
+from ..net import LineReader, path_info, read_stream_header, remote_key, stop_stream
 
 HELLO_TIMEOUT = 10      # the hello must come this soon after connecting
 IDLE_TIMEOUT = 20       # nothing at all from the viewer (it pings every 5 s): it is gone
@@ -16,7 +16,7 @@ PING_EVERY = 5
 # what a one-way stream from the viewer needs
 STREAM_NEEDS = {"input": "control", "file": "files"}
 # what a datagram (by its first byte) needs
-DGRAM_NEEDS = {1: "control"}
+DGRAM_NEEDS = {P.DG_MOUSE: "control", P.DG_VIDEO_ACK: "view"}
 
 
 class HostSession:
@@ -218,11 +218,3 @@ class HostSession:
             await stop_stream(rs)
             return
         await self.core.on_stream(self, header, rest, rs)
-
-
-async def stop_stream(rs, code=1):
-    """Tell the sender we won't read this stream."""
-    try:
-        await rs.stop(code)
-    except Exception:
-        pass

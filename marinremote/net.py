@@ -119,6 +119,33 @@ async def read_stream_header(rs):
     return parse_stream_header(head[len(STREAM_MAGIC):]), rest
 
 
+class BufferedStream:
+    """read_exact() over a QUIC stream in big chunks (one FFI call per chunk, not per frame)."""
+
+    def __init__(self, rs, initial=b"", chunk=256 * 1024):
+        self.rs = rs
+        self.buf = bytearray(initial)
+        self.chunk = chunk
+
+    async def read_exact(self, n):
+        while len(self.buf) < n:
+            data = await self.rs.read(max(self.chunk, n - len(self.buf)))
+            if not data:
+                raise EOFError("stream ended")
+            self.buf += data
+        out = bytes(self.buf[:n])
+        del self.buf[:n]
+        return out
+
+
+async def stop_stream(rs, code=1):
+    """Tell the sender we won't read this stream."""
+    try:
+        await rs.stop(code)
+    except Exception:
+        pass
+
+
 def path_info(conn):
     """The path in use: via_relay (bool), via (remote address), rtt (ms)."""
     try:

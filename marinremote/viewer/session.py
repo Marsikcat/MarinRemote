@@ -11,7 +11,7 @@ import time
 
 from .. import protocol as P
 from ..config import VERSION
-from ..net import LineReader, path_info
+from ..net import LineReader, path_info, read_stream_header, stop_stream
 
 PING_EVERY = 5
 IDLE_TIMEOUT = 20
@@ -68,6 +68,9 @@ class ViewerSession:
         self.queue = None
         self.stopping = False
         self.connected_at = None
+        # parts of the session (the picture…): on_stream(header, rest, rs) -> bool (async),
+        # on_datagram(data) -> bool, connected(session) — all on the network thread
+        self.handlers = []
 
     # ── thread-safe ─────────────────────────────────────────────────
     def start(self):
@@ -191,7 +194,10 @@ class ViewerSession:
         self.connected_at = time.monotonic()
         self.queue = asyncio.Queue()
         self._set("connected")
-        tasks = [self.net.spawn(self._read(reader, conn)), self.net.spawn(self._write(send))]
+        for h in self.handlers:
+            h.connected(self)
+        tasks = [self.net.spawn(c) for c in (self._read(reader, conn), self._write(send),
+                                             self._accept_streams(conn), self._read_datagrams(conn))]
         result = await self._ended(conn, True)
         for t in tasks:
             t.cancel()
@@ -226,6 +232,46 @@ class ViewerSession:
                 self.rights = P.clean_rights(msg.get("rights"))
                 self.events.state_changed(self)
             self.events.message(self, msg)
+
+    async def _accept_streams(self, conn):
+        while True:
+            try:
+                rs = await conn.accept_uni()
+            except Exception:
+                return
+            self.net.spawn(self._stream(rs))
+
+    async def _stream(self, rs):
+        try:
+            header, rest = await asyncio.wait_for(read_stream_header(rs), 10)
+        except Exception:
+            header, rest = None, b""
+        if header is not None and header.get("sid") == self.sid:
+            for h in self.handlers:
+                if await h.on_stream(header, rest, rs):
+                    return
+        await stop_stream(rs)
+
+    async def _read_datagrams(self, conn):
+        while True:
+            try:
+                data = await conn.read_datagram()
+            except Exception:
+                return
+            if len(data) < 5 or data[1:5] != P.dgram_tag(self.sid):
+                continue
+            for h in self.handlers:
+                if h.on_datagram(data):
+                    break
+
+    def send_datagram(self, data):
+        """Network thread; lost on the way is fine."""
+        conn = self.conn
+        if conn is not None:
+            try:
+                conn.send_datagram(data)
+            except Exception:
+                pass
 
     async def _write(self, send):
         while True:

@@ -16,8 +16,8 @@ import time
 from .. import protocol as P
 from ..auth import Limiter, MODES, PromptGate, ResumeTokens, decide, verify_password
 from ..config import VERSION
-from ..net import path_info
-from .session import HostSession, stop_stream
+from ..net import path_info, stop_stream
+from .session import HostSession
 
 
 class Approver:

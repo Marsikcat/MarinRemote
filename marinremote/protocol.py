@@ -11,6 +11,7 @@ The MarinRemote wire protocol, version 1 — one QUIC connection per session (do
 
 import json
 import re
+import struct
 
 APP = "MarinRemote"
 ALPN = b"marinremote/1"
@@ -30,7 +31,8 @@ RIGHT_SHORT = {"view": "просмотр", "control": "управление", "f
 
 # what each message from the viewer needs; anything else (except the free ones) is unknown
 NEEDS = {
-    "monitor": "view", "video.key": "view", "video.quality": "view",
+    "monitor": "view", "video.key": "view", "video.quality": "view", "video.pause": "view",
+    "clock": "view",
     "clip": "clipboard",
     "fs.roots": "files", "fs.list": "files", "fs.mkdir": "files", "fs.rename": "files",
     "fs.delete": "files", "get": "files", "put": "files", "put.end": "files", "xfer.cancel": "files",
@@ -142,6 +144,63 @@ def dgram_tag(sid):
 
 def dgram(kind, sid, payload):
     return bytes([kind]) + dgram_tag(sid) + payload
+
+
+DG_MOUSE = 1        # viewer → host: seq u32, x u16, y u16 (stage c)
+DG_CURSOR = 2       # host → viewer: seq u32, x u16, y u16, flags u8
+DG_VIDEO_ACK = 3    # viewer → host: segment u32, last frame received u32, last frame shown u32
+
+CURSOR_VISIBLE = 1      # the pointer is showing at all
+CURSOR_HERE = 2         # …and it is on the monitor being watched
+
+_CURSOR = struct.Struct("<IHHB")
+_ACK = struct.Struct("<III")
+
+
+def pack_cursor(sid, seq, x, y, flags):
+    return dgram(DG_CURSOR, sid, _CURSOR.pack(seq & 0xFFFFFFFF, x, y, flags))
+
+
+def unpack_cursor(data):
+    """(seq, x, y, flags) from a whole cursor datagram, or None."""
+    if len(data) != 5 + _CURSOR.size:
+        return None
+    return _CURSOR.unpack_from(data, 5)
+
+
+def pack_ack(sid, seg, received, shown):
+    return dgram(DG_VIDEO_ACK, sid, _ACK.pack(seg, received & 0xFFFFFFFF, shown & 0xFFFFFFFF))
+
+
+def unpack_ack(data):
+    if len(data) != 5 + _ACK.size:
+        return None
+    return _ACK.unpack_from(data, 5)
+
+
+def norm(value, origin, size):
+    """A pixel coordinate on a monitor → 0..65535 across it (clamped)."""
+    if size <= 1:
+        return 0
+    return max(0, min(65535, round((value - origin) * 65535 / (size - 1))))
+
+
+# ── video frames: [u32 length][u64 capture time, µs][u8 flags][H.264 Annex-B] ──
+FRAME = struct.Struct("<IQB")
+FRAME_KEY = 1
+MAX_FRAME = 32 * 1024 * 1024
+
+
+def pack_frame(data, ts_us, flags):
+    return FRAME.pack(len(data), ts_us, flags) + data
+
+
+def unpack_frame_header(raw):
+    """(length, ts_us, flags); ValueError for something that can't be a frame."""
+    n, ts, flags = FRAME.unpack(raw)
+    if n == 0 or n > MAX_FRAME:
+        raise ValueError(f"bad frame length {n}")
+    return n, ts, flags
 
 
 # ── one-way streams ────────────────────────────────────────────────

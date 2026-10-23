@@ -5,6 +5,7 @@ with no servers of its own: QUIC through iroh, dialled by the PC's public key.
 
     python app.py              open the app (this PC can be connected to; it can connect out)
     python app.py --autostart  launched by Windows at logon (starts in the tray)
+    python app.py --encoder <json>   the screen encoder (started by the app itself)
 
 MARINREMOTE_INSTANCE=1 (2, …) runs a test copy with its own ports and a data folder in %TEMP%.
 """
@@ -92,6 +93,7 @@ def main():
         return 1
 
     from marinremote.host.core import HostCore
+    from marinremote.host.video import VideoService
     from marinremote.journal import Journal
     from marinremote.net import Node
     from marinremote.ui import theme
@@ -109,6 +111,7 @@ def main():
     approver = QtApprover(node.net)
     bridge = HostBridge()
     core = HostCore(settings, node, journal, approver, events=bridge)
+    core.services.append(VideoService(core))
     win = MainWindow(settings, node, core, journal, approver, bridge)
 
     def on_second_instance():
@@ -131,4 +134,8 @@ def main():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 2 and sys.argv[1] == "--encoder":
+        # the screen encoder: a separate process of this same program, no window, no Qt
+        from marinremote.host import encoder
+        sys.exit(encoder.main(sys.argv[2]))
     sys.exit(main())
