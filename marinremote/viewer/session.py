@@ -231,7 +231,8 @@ class ViewerSession:
             if msg["t"] == "rights":
                 self.rights = P.clean_rights(msg.get("rights"))
                 self.events.state_changed(self)
-            self.events.message(self, msg)
+            if not any(getattr(h, "on_message", None) and h.on_message(msg) for h in self.handlers):
+                self.events.message(self, msg)
 
     async def _accept_streams(self, conn):
         while True:

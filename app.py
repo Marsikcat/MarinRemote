@@ -93,6 +93,7 @@ def main():
         return 1
 
     from marinremote.host.core import HostCore
+    from marinremote.host.files import FilesService
     from marinremote.host.input import InputService
     from marinremote.host.video import VideoService
     from marinremote.journal import Journal
@@ -113,7 +114,7 @@ def main():
     bridge = HostBridge()
     core = HostCore(settings, node, journal, approver, events=bridge)
     video = VideoService(core)
-    core.services += [video, InputService(core, video)]
+    core.services += [video, InputService(core, video), FilesService(core)]
     win = MainWindow(settings, node, core, journal, approver, bridge)
 
     def on_second_instance():

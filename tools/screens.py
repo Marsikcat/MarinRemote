@@ -87,8 +87,58 @@ def main(out):
             sess.rights, sess.remembered, sess.host = ["view", "control"], "contact", {"name": "Домашний ПК"}
         viewer._on_state(sess)
         shot(viewer, out / f"session-{name}.png")
+    shot_files(out)
     win.indicators.close()
     node.stop()
+
+
+def shot_files(out):
+    """The file manager with a made-up remote PC and a few transfers in different states."""
+    import concurrent.futures
+
+    from marinremote.ui.filemanager import FileManager
+    from marinremote.viewer.files import Transfer
+
+    remote = {"home": [{"n": "Документы", "d": True, "s": 0, "m": 1792700000},
+                       {"n": "Загрузки", "d": True, "s": 0, "m": 1792700000},
+                       {"n": "отчёт.docx", "d": False, "s": 184_320, "m": 1792740000},
+                       {"n": "видео.mp4", "d": False, "s": 1_073_741_824, "m": 1792745000}]}
+
+    class FakeFiles:
+        def __init__(self):
+            a = Transfer("get", "видео.mp4", "C:\\x\\видео.mp4", "home/видео.mp4", 1 << 30, 0)
+            a.state, a.done = "running", 412 << 20
+            for _ in range(5):
+                a.speed.add(90 << 20)
+                time.sleep(0.01)
+            b = Transfer("put", "проект.zip", "C:\\x\\проект.zip", "home", 52 << 20, 0)
+            b.state, b.done = "done", 52 << 20
+            c = Transfer("put", "архив.7z", "C:\\x\\архив.7z", "home", 300 << 20, 0)
+            c.state, c.done, c.error = "interrupted", 120 << 20, "связь прервалась — продолжится с того же места"
+            self.items = [a, b, c]
+
+        def request(self, msg):
+            f = concurrent.futures.Future()
+            if msg["t"] == "fs.roots":
+                f.set_result({"ok": True, "roots": [{"id": "home", "label": "Папка пользователя"}]})
+            else:
+                f.set_result({"ok": True, "entries": remote.get(msg.get("path"), [])})
+            return f
+
+        def snapshot(self):
+            return self.items
+
+        def clear_finished(self):
+            pass
+
+    fm = FileManager(FakeFiles(), "Домашний ПК")
+    fm.show()
+    for _ in range(5):
+        QApplication.processEvents()
+        time.sleep(0.05)
+    fm.refresh_transfers()
+    shot(fm, out / "files.png")
+    fm.close()
 
 
 if __name__ == "__main__":

@@ -25,6 +25,29 @@ import iroh
 from .config import DISCOVERY_PORT, PEER_PORT
 from .protocol import ALPN, APP, MAX_HEADER, MAX_LINE, PROTO, STREAM_MAGIC, parse_stream_header
 
+def _speed_up_bindings():
+    """iroh's generated Python bindings copy every byte handed to Rust (write_all, datagrams) one
+    at a time in a Python loop: ~6 MB/s and a whole core, for files and video alike. Copy the
+    buffer in one go instead — the same bytes in the same place, ~30 times faster. Only applied
+    while the buffer still looks the way this code expects."""
+    import ctypes
+    ffi = getattr(iroh, "iroh_ffi", None)
+    builder = getattr(ffi, "_UniffiRustBufferBuilder", None)
+    buffer = getattr(ffi, "_UniffiRustBuffer", None)
+    fields = dict(getattr(buffer, "_fields_", []))
+    if builder is None or fields.get("data") is not ctypes.POINTER(ctypes.c_char) or not hasattr(builder, "_reserve"):
+        return False
+
+    def write(self, value):
+        n = len(value)
+        with self._reserve(n):
+            ctypes.memmove(ctypes.cast(self.rbuf.data, ctypes.c_void_p).value + self.rbuf.len, bytes(value), n)
+
+    builder.write = write
+    return True
+
+
+FAST_BINDINGS = _speed_up_bindings()
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 IPV4 = r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"
 KEY_RE = re.compile(r"^[0-9a-f]{64}$")

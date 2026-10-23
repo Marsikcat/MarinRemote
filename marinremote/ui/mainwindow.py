@@ -3,11 +3,12 @@ The main window: this PC (its code, who is connected), connecting to another PC 
 contacts, PCs on the LAN), who may come in without asking, and the journal.
 """
 
+import os
 import threading
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog,
                                QFrame, QHBoxLayout, QInputDialog, QLineEdit, QMainWindow, QMenu,
                                QMessageBox, QPushButton, QScrollArea, QStackedWidget,
                                QSystemTrayIcon, QTableWidget, QTableWidgetItem, QHeaderView,
@@ -453,6 +454,18 @@ class MainWindow(QMainWindow):
         lay.addWidget(c)
 
         c, cl = card()
+        cl.addWidget(label("ПАПКИ ДЛЯ ФАЙЛОВ", "caption"))
+        self.roots_box = QVBoxLayout()
+        self.roots_box.setSpacing(2)
+        cl.addLayout(self.roots_box)
+        add_root = button("Добавить папку или диск", "small", self._add_root)
+        cl.addWidget(hbox(add_root, None))
+        cl.addWidget(label("Устройства с правом «файлы» видят только эти папки — и ничего выше или рядом "
+                           "с ними, даже по ярлыкам и ссылкам.", "hint", wrap=True))
+        self.access_widgets.append(add_root)
+        lay.addWidget(c)
+
+        c, cl = card()
         cl.addWidget(label("ЗАБЛОКИРОВАННЫЕ", "caption"))
         self.blocked_box = QVBoxLayout()
         self.blocked_box.setSpacing(2)
@@ -502,6 +515,16 @@ class MainWindow(QMainWindow):
             self.trusted_box.addWidget(row(text, mode, forget))
             self.access_widgets_dynamic += [mode, forget]
 
+        clear_layout(self.roots_box)
+        roots = list(self.s["roots"] or [])
+        if not roots:
+            self.roots_box.addWidget(label("Нет — файлы этого ПК удалённо недоступны.", "muted"))
+        for r in roots:
+            text = label(f"<b>{r.get('label', '')}</b> · {r.get('path', '')}")
+            remove = button("Убрать", "small", lambda _=False, rid=r["id"]: self._remove_root(rid))
+            self.roots_box.addWidget(row(text, remove))
+            self.access_widgets_dynamic.append(remove)
+
         clear_layout(self.blocked_box)
         blocked = dict(self.s["blocked"] or {})
         if not blocked:
@@ -512,6 +535,30 @@ class MainWindow(QMainWindow):
             self.blocked_box.addWidget(row(text, unblock))
         self.hotkey_label.setText(describe(self.s["kill_hotkey"]))
         self._lock_access(any("control" in s["rights"] for s in self.sessions))
+
+    def _add_root(self):
+        path = QFileDialog.getExistingDirectory(self, "Папка, к которой будет доступ")
+        if not path:
+            return
+        path = os.path.normpath(path)
+        roots = list(self.s["roots"] or [])
+        if any(os.path.normcase(r["path"]) == os.path.normcase(path) for r in roots):
+            return
+        used = {r["id"] for r in roots}
+        rid = next(f"r{i}" for i in range(1, 1000) if f"r{i}" not in used)
+        label_text = os.path.basename(path.rstrip("\\")) or path
+        roots.append({"id": rid, "path": path, "label": label_text})
+        self.s.set("roots", roots)
+        self.journal.write("roots", action="add", path=path)
+        self._refresh_access()
+
+    def _remove_root(self, rid):
+        roots = list(self.s["roots"] or [])
+        gone = next((r for r in roots if r["id"] == rid), None)
+        self.s.set("roots", [r for r in roots if r["id"] != rid])
+        if gone:
+            self.journal.write("roots", action="remove", path=gone.get("path"))
+        self._refresh_access()
 
     def _lock_access(self, locked):
         self.lock_note.setVisible(locked)
@@ -587,7 +634,8 @@ class MainWindow(QMainWindow):
 
     def _journal_add(self, e):
         details = []
-        for k in ("rights", "reason", "how", "what", "mode", "remember", "via", "seconds", "sessions", "action"):
+        for k in ("rights", "reason", "how", "what", "mode", "remember", "via", "seconds", "sessions", "action",
+                  "path", "to", "size", "result", "offset"):
             v = e.get(k)
             if v in (None, "", []):
                 continue

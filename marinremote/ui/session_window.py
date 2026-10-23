@@ -13,6 +13,7 @@ import time
 from collections import deque
 
 import ctypes
+import os
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QInputDialog, QStackedWidget,
@@ -22,12 +23,14 @@ from ..codes import fingerprint
 from ..host.capture import QUALITY
 from ..protocol import AUTH_REASONS, describe_rights, wait_text
 from ..viewer.decoder import Decoder
+from ..viewer.files import FileClient, join
 from ..viewer.input import InputSender
 from ..viewer.kbhook import KeyboardHook
 from ..viewer.session import END_TEXT, ViewerSession
 from ..viewer.video import VideoReceiver
 from . import icons
 from .bridge import ViewerBridge
+from .filemanager import FileManager
 from .theme import GREEN, RED, YELLOW, style_window
 from .videowidget import VideoWidget, now_us
 from .widgets import button, dot, label, note
@@ -105,6 +108,8 @@ class SessionWindow(QWidget):
                                    "Чтобы вернуть их своему ПК, щёлкните вне окна или выключите это.")
         self.keys_btn.setCheckable(True)
         self.keys_btn.setChecked(True)
+        self.files_btn = button("Файлы", "small", self._open_files,
+                                tip="Файлы этого и удалённого ПК; файлы можно и просто перетащить на картинку")
         self.stats_btn = button("Статистика", "small", self._toggle_stats)
         self.stats_btn.setCheckable(True)
         self.full_btn = button("На весь экран", "small", self._toggle_full,
@@ -112,8 +117,8 @@ class SessionWindow(QWidget):
         self.save_btn = button("Сохранить в контакты", "small", self._save_contact)
         self.retry_btn = button("Подключиться снова", "small", self._retry)
         self.leave_btn = button("Отключить", "danger", self.close)
-        for w in (self.monitor_box, self.quality_box, self.control_btn, self.keys_btn, self.stats_btn,
-                  self.full_btn, self.save_btn, self.retry_btn, self.leave_btn):
+        for w in (self.monitor_box, self.quality_box, self.control_btn, self.keys_btn, self.files_btn,
+                  self.stats_btn, self.full_btn, self.save_btn, self.retry_btn, self.leave_btn):
             w.setFocusPolicy(Qt.NoFocus)        # keys stay with the picture (and the remote PC)
             b.addWidget(w)
         lay.addWidget(self.bar)
@@ -151,7 +156,10 @@ class SessionWindow(QWidget):
         self.full_requested.connect(self._toggle_full)
         self.session = None
         self.input = None
+        self.files = None
+        self.file_manager = None
         self._hooked = None
+        self.setAcceptDrops(True)
         self._start(password)
 
     def showEvent(self, e):
@@ -167,6 +175,9 @@ class SessionWindow(QWidget):
                                      password=password)
         self.rx = VideoReceiver(self.session, self.decoder)
         self.input = InputSender(self.session)
+        self.files = FileClient(self.session, self.s.folder / "transfers.json")
+        if self.file_manager is not None:
+            self.file_manager.set_client(self.files)
         self.video.rx = self.rx
         self.video.input = self.input
         self.video.clear()
@@ -200,6 +211,7 @@ class SessionWindow(QWidget):
             w.setVisible(watching)
         for w in (self.control_btn, self.keys_btn):
             w.setVisible(watching and "control" in session.rights)
+        self.files_btn.setVisible(st in ("connected", "reconnecting") and "files" in session.rights)
         self.monitor_box.setVisible(watching and self.monitor_box.count() > 1)
         if st != "connected":
             self.warn.hide()
@@ -338,6 +350,60 @@ class SessionWindow(QWidget):
             self.input.key(scan, ext, down, vk)
         return True
 
+    # ── files ───────────────────────────────────────────────────────
+    def _open_files(self):
+        if self.file_manager is None:
+            self.file_manager = FileManager(self.files, self._name())
+            self.file_manager.destroyed.connect(self._files_closed)
+        self.file_manager.showNormal()
+        self.file_manager.raise_()
+        self.file_manager.activateWindow()
+
+    def _files_closed(self):
+        self.file_manager = None
+
+    def dragEnterEvent(self, e):
+        s = self.session
+        if e.mimeData().hasUrls() and s is not None and s.state == "connected" and "files" in s.rights:
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dropEvent(self, e):
+        """Files dropped on the session go to the folder open on the right of «Файлы», or else
+        into the remote PC's Downloads."""
+        paths = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
+        if not paths:
+            return
+        e.acceptProposedAction()
+        fm = self.file_manager
+        if fm is not None and fm.remote_dir:
+            fm.send(paths)
+            self._open_files()
+            return
+        self._open_files()
+
+        def got_roots(reply):
+            roots = reply.get("roots") or []
+            if not reply.get("ok") or not roots:
+                self._note("На удалённом ПК не открыто ни одной папки для файлов.")
+                return
+            root = roots[0]["id"]
+
+            def got_downloads(r):
+                folder = join(root, "Downloads") if r.get("ok") else root
+                for p in paths:
+                    (self.files.upload_tree if os.path.isdir(p) else self.files.upload)(p, folder)
+                self._note(f"Отправляю на удалённый ПК, в «{folder.split('/', 1)[-1] if '/' in folder else 'корень'}»: "
+                           f"{len(paths)} шт.")
+            self.file_manager.ask({"t": "fs.list", "path": join(root, "Downloads")}, got_downloads)
+        self.file_manager.ask({"t": "fs.roots"}, got_roots)
+
+    def _note(self, text):
+        self.warn.text.setText(text)
+        self.warn.show()
+        QTimer.singleShot(5000, lambda: self.warn.text.text() == text and self.warn.hide())
+
     def _hide_self_warning(self):
         if self.warn.text.text() == WARNINGS["self"]:
             self.warn.hide()
@@ -446,6 +512,8 @@ class SessionWindow(QWidget):
             self._hooked = None
         if self.input is not None:
             self.input.release_all()
+        if self.file_manager is not None:
+            self.file_manager.close()
         if self.session is not None:
             self.session.stop()
         self.decoder.stop()
