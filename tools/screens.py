@@ -59,9 +59,12 @@ def main(out):
     sessions = [{"sid": "a1", "key": "ef" * 32, "fp": "7K3M-Q9XA", "name": "Ноутбук",
                  "rights": ["view", "control"], "started": time.time(), "via_relay": False}]
     win._on_sessions(sessions)
-    for i, name in enumerate(("host", "connect", "access", "journal")):
+    for i, name in enumerate(("host", "connect", "access", "journal", "settings")):
         win.nav.button(i).click()
         shot(win, out / f"main-{name}.png")
+    win.tray_menu.popup(win.mapToGlobal(win.rect().center()))
+    shot(win.tray_menu, out / "tray-menu.png")
+    win.tray_menu.hide()
     dlg = ApproveDialog({"id": 1, "key": "ab" * 32, "fp": "50B8-DJPM", "name": "Ноутбук Маши",
                          "want": ["view", "control", "files", "clipboard"], "record": None,
                          "remember": True, "password_given": False, "timeout": 30,

@@ -74,6 +74,7 @@ DEFAULTS = {
     "want_rights": list(RIGHTS_ALL),
     # ── window ──
     "close_to_tray": True,
+    "start_minimized": True,    # started by Windows at logon: straight to the tray, no window
     "window": None,
 }
 

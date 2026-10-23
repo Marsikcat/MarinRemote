@@ -13,11 +13,13 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _launch_command():
+    # the Run key can't set environment variables: a test copy says which one it is by argument
+    extra = f" --instance {INSTANCE}" if INSTANCE else ""
     if FROZEN:
-        return f'"{sys.executable}" --autostart'
+        return f'"{sys.executable}" --autostart{extra}'
     exe = Path(sys.executable)
     pyw = exe.with_name("pythonw.exe")
-    return f'"{pyw if pyw.exists() else exe}" "{ROOT / "app.py"}" --autostart'
+    return f'"{pyw if pyw.exists() else exe}" "{ROOT / "app.py"}" --autostart{extra}'
 
 
 def autostart_enabled():

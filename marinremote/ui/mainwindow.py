@@ -115,7 +115,8 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.nav = QButtonGroup(self)
         for i, (text, build) in enumerate((("Этот ПК", self._page_host), ("Подключиться", self._page_connect),
-                                           ("Доступ", self._page_access), ("Журнал", self._page_journal))):
+                                           ("Доступ", self._page_access), ("Журнал", self._page_journal),
+                                           ("Настройки", self._page_settings))):
             b = QPushButton(text)
             b.setObjectName("NavButton")
             b.setCheckable(True)
@@ -198,34 +199,12 @@ class MainWindow(QMainWindow):
         cl.addWidget(self.kill_hint)
         lay.addWidget(c)
 
-        c, cl = card()
-        cl.addWidget(label("ЗАПУСК И СЕТЬ", "caption"))
-        cl.addWidget(switch_row("Запускать вместе с Windows",
-                                "MarinRemote стартует в трее при входе в Windows — к этому ПК можно подключиться.",
-                                autostart_enabled(), self._set_autostart))
-        cl.addWidget(switch_row("Закрытие окна сворачивает в трей",
-                                "Иначе закрытие окна выходит из программы и обрывает подключения.",
-                                self.s["close_to_tray"], lambda on: self._set("close_to_tray", on)))
-        self.firewall_btn = button("Открыть порты в брандмауэре", "small", self._open_firewall,
-                                   tip=f"Входящие UDP {DISCOVERY_PORT} и {PEER_PORT} — Windows спросит права администратора")
-        self.firewall_note = label("Нужно только для прямых подключений в локальной сети, если брандмауэр их "
-                                   "не пропустил. Через интернет всё работает и так.", "hint", wrap=True)
-        cl.addWidget(hbox(self.firewall_btn, None))
-        cl.addWidget(self.firewall_note)
-        lay.addWidget(c)
-
         if not is_elevated():
             lay.addWidget(note("MarinRemote работает с правами обычного пользователя. Окнами программ, "
                                "запущенных от имени администратора, запросом UAC и экраном входа "
                                "удалённо управлять нельзя — это ограничение Windows."))
         lay.addStretch(1)
         return area
-
-    def _set_autostart(self, on):
-        try:
-            set_autostart(on)
-        except OSError as e:
-            QMessageBox.warning(self, "Автозапуск", f"Не получилось: {e}")
 
     def _open_firewall(self):
         self.firewall_btn.setEnabled(False)
@@ -644,6 +623,66 @@ class MainWindow(QMainWindow):
         self._refresh_access()
         self._on_sessions(self.sessions)
 
+    # ═════════════════════════ settings ════════════════════════════
+    SETTINGS_PAGE = 4
+
+    def _page_settings(self):
+        area, lay = page("Настройки")
+        c, cl = card()
+        cl.addWidget(label("ЗАПУСК", "caption"))
+        self.autostart_row = switch_row(
+            "Запускать вместе с Windows",
+            "MarinRemote стартует при входе в Windows — к этому ПК можно подключиться, даже если вы "
+            "сами программу не открывали. То же есть в меню значка в трее.",
+            autostart_enabled(), self._apply_autostart)
+        cl.addWidget(self.autostart_row)
+        cl.addWidget(switch_row("При автозапуске — сразу в трей",
+                                "Окно не открывается: программа тихо ждёт подключений, значок — в трее.",
+                                self.s["start_minimized"], lambda on: self._set("start_minimized", on)))
+        cl.addWidget(switch_row("Закрытие окна сворачивает в трей",
+                                "Иначе закрытие окна выходит из программы и обрывает подключения.",
+                                self.s["close_to_tray"], lambda on: self._set("close_to_tray", on)))
+        lay.addWidget(c)
+
+        c, cl = card()
+        cl.addWidget(label("СЕТЬ", "caption"))
+        self.firewall_btn = button("Открыть порты в брандмауэре", "small", self._open_firewall,
+                                   tip=f"Входящие UDP {DISCOVERY_PORT} и {PEER_PORT} — Windows спросит права администратора")
+        self.firewall_note = label(f"Входящие UDP {PEER_PORT} и {DISCOVERY_PORT}. Нужно только для прямых "
+                                   "подключений в локальной сети, если брандмауэр их не пропустил — через "
+                                   "интернет всё работает и так.", "hint", wrap=True)
+        cl.addWidget(hbox(self.firewall_btn, None))
+        cl.addWidget(self.firewall_note)
+        lay.addWidget(c)
+
+        c, cl = card()
+        cl.addWidget(label("О ПРОГРАММЕ", "caption"))
+        cl.addWidget(label(f"MarinRemote {VERSION}" + (f" · тестовый экземпляр {INSTANCE}" if INSTANCE else "")))
+        cl.addWidget(label(f"Данные: {self.s.folder}", "hint", wrap=True, selectable=True))
+        cl.addWidget(hbox(button("Открыть папку данных", "small", lambda: os.startfile(self.s.folder)), None))
+        lay.addWidget(c)
+        lay.addStretch(1)
+        return area
+
+    def _apply_autostart(self, on):
+        """The switch in Settings and the check mark in the tray menu are one setting: the Run key."""
+        if on != autostart_enabled():
+            try:
+                set_autostart(on)
+            except OSError as e:
+                QMessageBox.warning(self, "Автозапуск", f"Не получилось: {e}")
+        self._sync_autostart()
+
+    def _sync_autostart(self):
+        on = autostart_enabled()                  # the installer can set it too: always ask Windows
+        self.autostart_row.switch.setChecked(on)
+        if hasattr(self, "autostart_action"):
+            self.autostart_action.setChecked(on)
+
+    def show_settings(self):
+        self.show_window()
+        self.nav.button(self.SETTINGS_PAGE).click()
+
     # ═════════════════════════ journal ═════════════════════════════
     def _page_journal(self):
         area, lay = page("Журнал", "Кто и когда подключался к этому ПК, с какими правами, что было "
@@ -679,12 +718,21 @@ class MainWindow(QMainWindow):
         show.triggered.connect(self.show_window)
         self.kill_action = QAction("Отключить все сеансы", menu)
         self.kill_action.triggered.connect(lambda: self.core.kill_all())
+        self.autostart_action = QAction("Запускать вместе с Windows", menu, checkable=True)
+        self.autostart_action.setChecked(autostart_enabled())
+        self.autostart_action.toggled.connect(self._apply_autostart)
+        settings = QAction("Настройки…", menu)
+        settings.triggered.connect(self.show_settings)
         quit_ = QAction("Выход", menu)
         quit_.triggered.connect(QApplication.quit)
         for a in (show, self.kill_action):
             menu.addAction(a)
         menu.addSeparator()
+        menu.addAction(self.autostart_action)
+        menu.addAction(settings)
+        menu.addSeparator()
         menu.addAction(quit_)
+        menu.aboutToShow.connect(self._sync_autostart)
         self.tray.setContextMenu(menu)
         self.tray_menu = menu
         self.tray.activated.connect(lambda reason: self.show_window()

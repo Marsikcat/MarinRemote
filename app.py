@@ -19,6 +19,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+# `--instance N` (what autostart of a test copy passes) means MARINREMOTE_INSTANCE=N; it has to be
+# known before marinremote.config is imported
+if "--instance" in sys.argv[1:-1]:
+    os.environ["MARINREMOTE_INSTANCE"] = sys.argv[sys.argv.index("--instance") + 1]
+
 REQUIRED = ("PySide6", "av", "numpy", "iroh", "nacl")
 
 
@@ -132,7 +137,7 @@ def main():
         node.stop()
     app.aboutToQuit.connect(on_quit)
 
-    if "--autostart" not in args:
+    if "--autostart" not in args or not settings["start_minimized"]:
         win.show()
     print(f"ready: {node.id} port {node.port} data {settings.folder}", flush=True)
     return app.exec()
