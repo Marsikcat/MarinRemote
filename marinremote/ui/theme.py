@@ -148,6 +148,9 @@ def stylesheet():
     QPushButton[kind="small"] {{ background: {c['active']}; color: {c['header']}; padding: 5px 10px;
                                  font-weight: 600; }}
     QPushButton[kind="small"]:hover {{ background: {shade(c['active'], 1.15) if not T.light else '#c9ccd1'}; }}
+    QPushButton[kind="small"]:checked {{ background: {c['accent']}; color: white; }}
+    QPushButton[kind="small"]:checked:hover {{ background: {c['accent_hover']}; }}
+    QPushButton[kind="small"]:checked:disabled {{ background: {c['active']}; color: {c['muted']}; }}
 
     QMenu {{ background: {c['float']}; border: none; border-radius: 6px; padding: 6px; }}
     QMenu::item {{ padding: 7px 26px 7px 10px; border-radius: 3px; color: {c['text']}; }}

@@ -93,6 +93,7 @@ def main():
         return 1
 
     from marinremote.host.core import HostCore
+    from marinremote.host.input import InputService
     from marinremote.host.video import VideoService
     from marinremote.journal import Journal
     from marinremote.net import Node
@@ -111,7 +112,8 @@ def main():
     approver = QtApprover(node.net)
     bridge = HostBridge()
     core = HostCore(settings, node, journal, approver, events=bridge)
-    core.services.append(VideoService(core))
+    video = VideoService(core)
+    core.services += [video, InputService(core, video)]
     win = MainWindow(settings, node, core, journal, approver, bridge)
 
     def on_second_instance():

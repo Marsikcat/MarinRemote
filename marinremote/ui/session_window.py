@@ -1,12 +1,18 @@
 """
 A connection to another PC as the viewer sees it: the remote screen in the middle; on top whom
-it is with, the path (direct or relayed, round trip), which monitor and quality, statistics,
-full screen and a way out. Before the picture comes (or without the right to see it) the middle
-says how things stand.
+it is with, the path (direct or relayed, round trip), which monitor and quality, control on or
+off, statistics, full screen and a way out. Before the picture comes (or without the right to
+see it) the middle says how things stand.
+
+With control on, the mouse over the picture and the keys while this window is in front go to
+the remote PC — the system keys too (Win, Alt+Tab…) through the keyboard hook. Ctrl+Alt+Enter
+stays here: it switches full screen.
 """
 
 import time
 from collections import deque
+
+import ctypes
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QInputDialog, QStackedWidget,
@@ -16,6 +22,8 @@ from ..codes import fingerprint
 from ..host.capture import QUALITY
 from ..protocol import AUTH_REASONS, describe_rights, wait_text
 from ..viewer.decoder import Decoder
+from ..viewer.input import InputSender
+from ..viewer.kbhook import KeyboardHook
 from ..viewer.session import END_TEXT, ViewerSession
 from ..viewer.video import VideoReceiver
 from . import icons
@@ -39,10 +47,19 @@ VIDEO_REASONS = {
     "no_monitor": "На удалённом ПК не найдено ни одного экрана.",
     "error": "Не удалось захватить экран удалённого ПК — пробуем снова…",
 }
+WARNINGS = {
+    "uipi": "На удалённом ПК впереди окно, запущенное от имени администратора{app}. Управлять им "
+            "MarinRemote не может — это ограничение Windows; картинку при этом видно.",
+    "secure": "На удалённом ПК открыт защищённый экран (запрос UAC, Ctrl+Alt+Del или блокировка) — "
+              "мышь и клавиатура туда не доходят.",
+    "self": "Окна MarinRemote на удалённом ПК нельзя нажимать удалённо — это защита от того, "
+            "чтобы зритель сам себе что-то разрешил.",
+}
 
 
 class SessionWindow(QWidget):
     finished = Signal(str)              # the remote key, when the window closes
+    full_requested = Signal()           # Ctrl+Alt+Enter caught by the keyboard hook
 
     def __init__(self, settings, node, target, want, password=None):
         super().__init__(None, Qt.Window)
@@ -79,16 +96,32 @@ class SessionWindow(QWidget):
         for key, q in QUALITY.items():
             self.quality_box.addItem(q["label"], key)
         self.quality_box.activated.connect(self._quality_chosen)
+        self.control_btn = button("Управление", "small", self._apply_control,
+                                  tip="Мышь и клавиатура управляют удалённым ПК")
+        self.control_btn.setCheckable(True)
+        self.control_btn.setChecked(True)
+        self.keys_btn = button("Системные клавиши", "small", self._apply_control,
+                               tip="Win, Alt+Tab, Alt+F4 и другие уходят на удалённый ПК, пока это окно впереди.\n"
+                                   "Чтобы вернуть их своему ПК, щёлкните вне окна или выключите это.")
+        self.keys_btn.setCheckable(True)
+        self.keys_btn.setChecked(True)
         self.stats_btn = button("Статистика", "small", self._toggle_stats)
         self.stats_btn.setCheckable(True)
-        self.full_btn = button("На весь экран", "small", self._toggle_full, tip="F11 — на весь экран и обратно")
+        self.full_btn = button("На весь экран", "small", self._toggle_full,
+                               tip="Ctrl+Alt+Enter — на весь экран и обратно")
         self.save_btn = button("Сохранить в контакты", "small", self._save_contact)
         self.retry_btn = button("Подключиться снова", "small", self._retry)
         self.leave_btn = button("Отключить", "danger", self.close)
-        for w in (self.monitor_box, self.quality_box, self.stats_btn, self.full_btn, self.save_btn,
-                  self.retry_btn, self.leave_btn):
+        for w in (self.monitor_box, self.quality_box, self.control_btn, self.keys_btn, self.stats_btn,
+                  self.full_btn, self.save_btn, self.retry_btn, self.leave_btn):
+            w.setFocusPolicy(Qt.NoFocus)        # keys stay with the picture (and the remote PC)
             b.addWidget(w)
         lay.addWidget(self.bar)
+        self.warn = note("", "Warning")
+        self.warn.layout().setContentsMargins(14, 7, 14, 7)
+        self.warn.setStyleSheet("#Warning { border-radius: 0; }")
+        self.warn.hide()
+        lay.addWidget(self.warn)
 
         self.stack = QStackedWidget()
         status = QWidget()
@@ -115,7 +148,10 @@ class SessionWindow(QWidget):
         self.timer = QTimer(self, interval=500, timeout=self._tick)
         self.timer.start()
         self.clock_timer = QTimer(self, interval=2000, timeout=self._ask_clock)
+        self.full_requested.connect(self._toggle_full)
         self.session = None
+        self.input = None
+        self._hooked = None
         self._start(password)
 
     def showEvent(self, e):
@@ -130,7 +166,9 @@ class SessionWindow(QWidget):
         self.session = ViewerSession(self.node, self.target, self.want, self.s["name"], self.bridge,
                                      password=password)
         self.rx = VideoReceiver(self.session, self.decoder)
+        self.input = InputSender(self.session)
         self.video.rx = self.rx
+        self.video.input = self.input
         self.video.clear()
         self.video_state = {}
         self.session.start()
@@ -160,7 +198,12 @@ class SessionWindow(QWidget):
         watching = st in ("connected", "reconnecting") and "view" in session.rights
         for w in (self.quality_box, self.stats_btn, self.full_btn):
             w.setVisible(watching)
+        for w in (self.control_btn, self.keys_btn):
+            w.setVisible(watching and "control" in session.rights)
         self.monitor_box.setVisible(watching and self.monitor_box.count() > 1)
+        if st != "connected":
+            self.warn.hide()
+        self._apply_control()
         self.big.setText(STATE_TEXT.get(st, st))
         self.info.hide()
         if st == "connected":
@@ -223,6 +266,15 @@ class SessionWindow(QWidget):
             self.video.update()
         elif t == "cursor":
             self.video.set_cursor(msg)
+        elif t == "warn":
+            code = msg.get("code")
+            text = WARNINGS.get(code)
+            if text:
+                app = msg.get("app") or ""
+                self.warn.text.setText(text.format(app=f" ({app})" if app else ""))
+            self.warn.setVisible(bool(text))
+            if code == "self":                       # a moment's notice, not a state
+                QTimer.singleShot(4000, self._hide_self_warning)
         elif t == "clock":
             self._got_clock(msg)
 
@@ -249,12 +301,52 @@ class SessionWindow(QWidget):
             self.full_btn.setText("Выйти из полноэкранного")
 
     def keyPressEvent(self, e):
-        if e.key() == Qt.Key_F11 or (e.key() == Qt.Key_Escape and self.isFullScreen()):
+        if not self.video.control and (e.key() == Qt.Key_F11 or (e.key() == Qt.Key_Escape and self.isFullScreen())):
             self._toggle_full()
             return
         super().keyPressEvent(e)
 
+    # ── control ─────────────────────────────────────────────────────
+    def _apply_control(self):
+        s = self.session
+        on = (s is not None and s.state == "connected" and "control" in s.rights
+              and self.control_btn.isChecked())
+        self.keys_btn.setEnabled(self.control_btn.isChecked())
+        self.video.set_control(on)
+        hook = on and self.keys_btn.isChecked()
+        if hook:
+            kb = KeyboardHook.get()
+            hwnd = int(self.winId())
+            if self._hooked != hwnd:
+                kb.register(hwnd, self._hook_key)
+                self._hooked = hwnd
+            self.video.keys_by_hook = kb.installed
+        else:
+            if self._hooked is not None:
+                KeyboardHook.get().unregister(self._hooked)
+                self._hooked = None
+            self.video.keys_by_hook = False
+        if on:
+            self.video.setFocus()
+
+    def _hook_key(self, scan, ext, down, vk):
+        """A key while this window is in front (the hook's thread): it goes to the remote PC."""
+        if vk == 0x0D and down and _held(0x11) and _held(0x12):        # Ctrl+Alt+Enter: ours
+            self.full_requested.emit()
+            return True
+        if self.input is not None:
+            self.input.key(scan, ext, down, vk)
+        return True
+
+    def _hide_self_warning(self):
+        if self.warn.text.text() == WARNINGS["self"]:
+            self.warn.hide()
+
     def eventFilter(self, obj, e):
+        if (obj is self.video and e.type() == QEvent.KeyPress and e.key() in (Qt.Key_Return, Qt.Key_Enter)
+                and e.modifiers() & Qt.ControlModifier and e.modifiers() & Qt.AltModifier):
+            self._toggle_full()
+            return True
         # full screen: the bar comes back while the pointer is at the top edge
         if obj is self.video and e.type() == QEvent.MouseMove and self.isFullScreen():
             near = e.position().y() < 4 or (self.bar.isVisible() and e.position().y() < self.bar.height() + 40)
@@ -266,6 +358,9 @@ class SessionWindow(QWidget):
         # nobody sees a minimised window: no picture until it comes back
         if e.type() == QEvent.WindowStateChange and self.session is not None and self.session.state == "connected":
             self.session.post({"t": "video.pause", "on": bool(self.windowState() & Qt.WindowMinimized)})
+        # the keys held when focus left would never be let go: let go of everything now
+        if e.type() == QEvent.ActivationChange and not self.isActiveWindow() and self.input is not None:
+            self.input.release_all()
         super().changeEvent(e)
 
     def _ask_clock(self):
@@ -346,8 +441,17 @@ class SessionWindow(QWidget):
     def closeEvent(self, e):
         self.timer.stop()
         self.clock_timer.stop()
+        if self._hooked is not None:
+            KeyboardHook.get().unregister(self._hooked)
+            self._hooked = None
+        if self.input is not None:
+            self.input.release_all()
         if self.session is not None:
             self.session.stop()
         self.decoder.stop()
         self.finished.emit(self.key)
         super().closeEvent(e)
+
+
+def _held(vk):
+    return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)

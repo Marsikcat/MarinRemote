@@ -155,6 +155,18 @@ CURSOR_HERE = 2         # …and it is on the monitor being watched
 
 _CURSOR = struct.Struct("<IHHB")
 _ACK = struct.Struct("<III")
+_MOUSE = struct.Struct("<IHH")
+
+
+def pack_mouse(sid, seq, x, y):
+    return dgram(DG_MOUSE, sid, _MOUSE.pack(seq & 0xFFFFFFFF, x, y))
+
+
+def unpack_mouse(data):
+    """(seq, x, y) from a whole mouse datagram, or None."""
+    if len(data) != 5 + _MOUSE.size:
+        return None
+    return _MOUSE.unpack_from(data, 5)
 
 
 def pack_cursor(sid, seq, x, y, flags):

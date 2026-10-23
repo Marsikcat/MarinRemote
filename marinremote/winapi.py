@@ -134,3 +134,128 @@ def virtual_screen():
     user32 = ctypes.windll.user32
     return (user32.GetSystemMetrics(76), user32.GetSystemMetrics(77),
             user32.GetSystemMetrics(78), user32.GetSystemMetrics(79))
+
+
+# ── windows, processes and what input can reach ────────────────────
+def _window_prototypes():
+    try:
+        user32, k32, advapi = ctypes.windll.user32, ctypes.windll.kernel32, ctypes.windll.advapi32
+    except AttributeError:
+        return
+    user32.GetForegroundWindow.restype = wt.HWND
+    user32.WindowFromPoint.argtypes = [wt.POINT]
+    user32.WindowFromPoint.restype = wt.HWND
+    user32.GetAncestor.argtypes = [wt.HWND, wt.UINT]
+    user32.GetAncestor.restype = wt.HWND
+    user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+    user32.OpenInputDesktop.restype = wt.HANDLE
+    user32.GetUserObjectInformationW.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD,
+                                                 ctypes.POINTER(wt.DWORD)]
+    user32.CloseDesktop.argtypes = [wt.HANDLE]
+    k32.OpenProcess.restype = wt.HANDLE
+    k32.CloseHandle.argtypes = [wt.HANDLE]
+    k32.GetCurrentProcess.restype = wt.HANDLE
+    k32.QueryFullProcessImageNameW.argtypes = [wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
+    advapi.OpenProcessToken.argtypes = [wt.HANDLE, wt.DWORD, ctypes.POINTER(wt.HANDLE)]
+    advapi.GetTokenInformation.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD,
+                                           ctypes.POINTER(wt.DWORD)]
+    advapi.GetSidSubAuthorityCount.argtypes = [ctypes.c_void_p]
+    advapi.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
+    advapi.GetSidSubAuthority.argtypes = [ctypes.c_void_p, wt.DWORD]
+    advapi.GetSidSubAuthority.restype = ctypes.POINTER(wt.DWORD)
+
+
+_window_prototypes()
+
+
+def window_pid(hwnd):
+    if not hwnd:
+        return 0
+    pid = wt.DWORD()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
+
+
+def foreground_pid():
+    return window_pid(ctypes.windll.user32.GetForegroundWindow())
+
+
+def pid_at(x, y):
+    """The process owning the top-level window under a point of the virtual desktop."""
+    user32 = ctypes.windll.user32
+    hwnd = user32.WindowFromPoint(wt.POINT(int(x), int(y)))
+    return window_pid(user32.GetAncestor(hwnd, 2) if hwnd else None)       # GA_ROOT
+
+
+def _integrity(process):
+    """The integrity level RID of a process handle (0x2000 medium, 0x3000 high, 0x4000 system),
+    None if its token can't be read."""
+    advapi, k32 = ctypes.windll.advapi32, ctypes.windll.kernel32
+    token = wt.HANDLE()
+    if not advapi.OpenProcessToken(process, 0x0008, ctypes.byref(token)):       # TOKEN_QUERY
+        return None
+    try:
+        need = wt.DWORD()
+        advapi.GetTokenInformation(token, 25, None, 0, ctypes.byref(need))       # TokenIntegrityLevel
+        buf = ctypes.create_string_buffer(need.value or 64)
+        if not advapi.GetTokenInformation(token, 25, buf, len(buf), ctypes.byref(need)):
+            return None
+        sid = ctypes.c_void_p.from_buffer(buf).value                              # TOKEN_MANDATORY_LABEL.Sid
+        count = advapi.GetSidSubAuthorityCount(sid)[0]
+        return advapi.GetSidSubAuthority(sid, count - 1)[0]
+    finally:
+        k32.CloseHandle(token)
+
+
+_own_integrity = None
+
+
+def process_name(pid):
+    k32 = ctypes.windll.kernel32
+    h = k32.OpenProcess(0x1000, False, pid)                                      # QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(520)
+        size = wt.DWORD(len(buf))
+        if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return os.path.basename(buf.value)
+        return ""
+    finally:
+        k32.CloseHandle(h)
+
+
+def above_us(pid):
+    """Does the process run at a higher integrity level than ours (an administrator's window:
+    Windows drops our injected input to it — UIPI)?"""
+    global _own_integrity
+    k32 = ctypes.windll.kernel32
+    if _own_integrity is None:
+        _own_integrity = _integrity(k32.GetCurrentProcess()) or 0x2000
+    if not pid or pid == os.getpid():
+        return False
+    h = k32.OpenProcess(0x1000, False, pid)
+    if not h:
+        return True                     # not even that much access: it is protected from us
+    try:
+        level = _integrity(h)
+    finally:
+        k32.CloseHandle(h)
+    return level is None or level > _own_integrity
+
+
+def secure_desktop():
+    """Is input going to another desktop than ours (UAC prompt, Ctrl+Alt+Del screen, the lock
+    screen)? Nothing we inject reaches it, nothing we capture shows it."""
+    user32 = ctypes.windll.user32
+    h = user32.OpenInputDesktop(0, False, 0x0001)                                # DESKTOP_READOBJECTS
+    if not h:
+        return True
+    try:
+        buf = ctypes.create_unicode_buffer(64)
+        need = wt.DWORD()
+        if not user32.GetUserObjectInformationW(h, 2, buf, ctypes.sizeof(buf), ctypes.byref(need)):   # UOI_NAME
+            return False
+        return buf.value.lower() != "default"
+    finally:
+        user32.CloseDesktop(h)
