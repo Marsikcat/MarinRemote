@@ -58,8 +58,8 @@ class Pair:
         self.hs["roots"] = [{"id": "home", "path": str(self.root), "label": "Тест"}]
         self.here = tmp_path / "here"
         self.here.mkdir()
-        self.host = Node(self.hs["secret_key"], port=0, mode="lan", bind_host="127.0.0.1", lan=False)
-        self.viewer = Node(self.vs["secret_key"], port=0, mode="lan", bind_host="127.0.0.1", lan=False)
+        self.host = Node(self.hs.secret_key, port=0, mode="lan", bind_host="127.0.0.1", lan=False)
+        self.viewer = Node(self.vs.secret_key, port=0, mode="lan", bind_host="127.0.0.1", lan=False)
         self.host.start()
         self.viewer.start()
         self.journal = Journal(tmp_path / "j.jsonl")

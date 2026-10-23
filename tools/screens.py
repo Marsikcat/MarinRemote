@@ -45,7 +45,7 @@ def main(out):
     s = Settings()
     s["contacts"] = {"cd" * 32: {"name": "Домашний ПК", "relay": None, "addrs": []}}
     s["trusted"] = {"ef" * 32: {"name": "Ноутбук", "rights": ["view", "control"], "mode": "contact"}}
-    node = Node(s["secret_key"], port=0, mode="lan", bind_host="127.0.0.1", lan=False)
+    node = Node(s.secret_key, port=0, mode="lan", bind_host="127.0.0.1", lan=False)
     node.start()
     journal = Journal(s.folder / "journal.jsonl")
     journal.write("request", "ef" * 32, name="Ноутбук", want=["view", "control"])

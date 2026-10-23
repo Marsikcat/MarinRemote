@@ -82,8 +82,8 @@ class Pair:
     def __init__(self, tmp_path, answer=None):
         self.hs = Settings(tmp_path / "host")
         self.vs = Settings(tmp_path / "viewer")
-        self.host = Node(self.hs["secret_key"], port=0, mode="lan", bind_host="127.0.0.1", lan=False)
-        self.viewer = Node(self.vs["secret_key"], port=0, mode="lan", bind_host="127.0.0.1", lan=False)
+        self.host = Node(self.hs.secret_key, port=0, mode="lan", bind_host="127.0.0.1", lan=False)
+        self.viewer = Node(self.vs.secret_key, port=0, mode="lan", bind_host="127.0.0.1", lan=False)
         self.host.start()
         self.viewer.start()
         self.journal = Journal(tmp_path / "host" / "journal.jsonl")

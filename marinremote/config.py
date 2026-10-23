@@ -53,7 +53,9 @@ def home_root():
 
 
 DEFAULTS = {
-    "secret_key": "",           # hex ed25519 key: the identity of this device
+    # the ed25519 key, the identity of this device — encrypted for this Windows user on this PC
+    # (DPAPI, base64); the key itself never reaches the disk
+    "secret_key_dpapi": "",
     "name": "",                 # how this PC is shown to others ("" = the computer name)
     "network_mode": "internet", # internet (relays + NAT traversal) | lan (direct only)
     # ── this PC, as a host ──
@@ -123,6 +125,8 @@ class Settings(dict):
         self.backup = self.folder / "settings.backup.json"
         self.lock = threading.RLock()
         self._backed_up = float("-inf")
+        self._secret = None
+        self.identity_note = None    # "new" | "migrated" | "unreadable" — what happened to the key
         self.update(self._load())
         self._ensure_identity()
         if not self["name"]:
@@ -179,12 +183,42 @@ class Settings(dict):
             self.save()
 
     def _ensure_identity(self):
-        """Our ed25519 key: the device ID is its public half (hex)."""
+        """Our ed25519 key: the device ID is its public half (hex). It is kept only encrypted with
+        DPAPI. A key from before that (plain hex) is taken over and encrypted. A key that can't be
+        decrypted — the file was copied from another PC or Windows user — is not this device's to
+        use: it is put aside and a new identity made."""
+        import base64
+
         import iroh
-        if len(self["secret_key"]) != 64:
-            self["secret_key"] = secrets.token_hex(32)
-        key = iroh.SecretKey.from_bytes(bytes.fromhex(self["secret_key"]))
-        self["uid"] = key.public().to_bytes().hex()
+
+        from . import dpapi
+        plain = self.pop("secret_key", "") or ""
+        blob = self.get("secret_key_dpapi") or ""
+        secret = None
+        if blob:
+            try:
+                secret = dpapi.unprotect(base64.b64decode(blob))
+                if len(secret) != 32:
+                    raise ValueError("not a key")
+            except (OSError, ValueError):
+                secret = None
+                self["secret_key_unreadable"] = blob
+                self.identity_note = "unreadable"
+        if secret is None and len(plain) == 64 and not blob:
+            secret = bytes.fromhex(plain)
+            self.identity_note = "migrated"
+        if secret is None:
+            secret = secrets.token_bytes(32)
+            self.identity_note = self.identity_note or "new"
+        if self.identity_note:
+            self["secret_key_dpapi"] = base64.b64encode(dpapi.protect(secret)).decode("ascii")
+        self._secret = secret.hex()
+        self["uid"] = iroh.SecretKey.from_bytes(secret).public().to_bytes().hex()
+
+    @property
+    def secret_key(self):
+        """The private key, hex — in memory only."""
+        return self._secret
 
     @property
     def uid(self):

@@ -12,7 +12,11 @@ is retransmitted — and the next segment starts at a fresh keyframe. Whole fram
 never bytes, so the decoder never sees half a picture.
 
 With quality "auto" a viewer that keeps falling behind (3 resets in 15 s) moves one step down
-the AUTO_STEPS ladder.
+the AUTO_STEPS ladder, and one step back up after a quiet spell (no resets for UP_AFTER seconds),
+up to the ceiling of its path: the top for a direct path, step 2 through a relay — so the picture
+also gets better by itself once iroh moves a relayed connection onto a direct one. A step up that
+soon ends in a step down doubles the wait before the next try (up to UP_WAIT_MAX), so the
+quality doesn't swing up and down on a link that can't hold the higher step.
 
 The pointer goes separately: its position by datagram (up to ~60 a second while it moves),
 its shape on the control stream whenever it changes.
@@ -34,6 +38,16 @@ LAG_MIN = 0.15
 RESETS_TO_STEP_DOWN = 3
 RESET_WINDOW = 15
 RESTART_DELAYS = (0.5, 1, 2, 4, 5)
+RELAY_CEILING = 2           # the best AUTO_STEPS rung through a relay
+UP_WAIT_MAX = 300
+PROBE_WINDOW = 30           # a step down this soon after a step up: that step up failed
+
+
+def auto_step(step, ceiling, quiet_for, wait):
+    """The rung "auto" should use now: one step up (towards the ceiling) after `wait` quiet seconds."""
+    if step > ceiling and quiet_for >= wait:
+        return step - 1
+    return step
 
 
 def _now_us():
@@ -104,6 +118,9 @@ class Watch:
         self.monitor = None
         self.quality = "auto"
         self.step = None             # the AUTO_STEPS rung while quality is "auto"
+        self.step_changed = time.monotonic()
+        self.stepped_up = 0.0
+        self.up_wait = svc.UP_AFTER  # quiet seconds before the next step up
         self.params = None
         self.enc_key = None
         self.seg = None
@@ -263,9 +280,13 @@ class _Entry:
         self.info = None
         self.failures = 0
         self.restart_handle = None
+        self.lost = []               # when desktop duplication was lost lately
+        self.no_dda = False          # it keeps being lost on this monitor: GDI instead
 
 
 class VideoService(Service):
+    UP_AFTER = 20                    # quiet seconds before "auto" tries one step up
+
     def __init__(self, core, monitors=None, encoder="auto"):
         self.core, self.net = core, core.net
         self.monitors_fn = monitors or winapi.monitors
@@ -289,7 +310,8 @@ class VideoService(Service):
         self._send_monitors(w)
         self._attach(w)
         if self._background is None:
-            self._background = [self.net.spawn(self._cursor_loop()), self.net.spawn(self._monitor_loop())]
+            self._background = [self.net.spawn(self._cursor_loop()), self.net.spawn(self._monitor_loop()),
+                                self.net.spawn(self._quality_loop())]
 
     def session_ended(self, s):
         w = self.watches.pop(s.sid, None)
@@ -320,6 +342,7 @@ class VideoService(Service):
             if msg.get("preset") in QUALITY:
                 w.quality = msg["preset"]
                 w.step = None
+                w.step_changed, w.up_wait = time.monotonic(), self.UP_AFTER
                 self._attach(w)
         elif t == "video.key":
             self.ask_key(w)
@@ -389,7 +412,8 @@ class VideoService(Service):
         entry.monitor = m
         if m.get("test"):
             return {"kind": "test", "w": m["w"], "h": m["h"]}
-        return {"kind": "monitor", "x": m["x"], "y": m["y"], "w": m["w"], "h": m["h"], "dxgi": m.get("dxgi")}
+        return {"kind": "monitor", "x": m["x"], "y": m["y"], "w": m["w"], "h": m["h"],
+                "dxgi": None if entry.no_dda else m.get("dxgi")}
 
     def _start(self, entry):
         entry.restart_handle = None
@@ -427,6 +451,13 @@ class VideoService(Service):
         if info.get("code") == 3:                  # the picture changed size: right away
             self._refresh_monitors()
             delay = 0.1
+        elif info.get("code") == 4:                # Windows took the desktop duplication back
+            now = time.monotonic()
+            entry.lost = [t for t in entry.lost if now - t < 10] + [now]
+            if len(entry.lost) >= 2 and not entry.no_dda:
+                entry.no_dda = True                # e.g. a monitor on another video adapter
+                print(f"encoder: desktop duplication keeps failing on {entry.monitor['dev']} — GDI", flush=True)
+            delay = 0.2
         else:
             entry.failures += 1
             delay = RESTART_DELAYS[min(entry.failures - 1, len(RESTART_DELAYS) - 1)]
@@ -446,9 +477,31 @@ class VideoService(Service):
 
     def on_congestion(self, w, reason):
         if w.quality == "auto" and len(w.resets) >= RESETS_TO_STEP_DOWN and w.step < len(AUTO_STEPS) - 1:
+            now = time.monotonic()
+            if now - w.stepped_up < PROBE_WINDOW:      # the last step up didn't hold: wait longer next time
+                w.up_wait = min(w.up_wait * 2, UP_WAIT_MAX)
             w.step += 1
+            w.step_changed = now
             w.resets.clear()
             self._attach(w)
+
+    async def _quality_loop(self):
+        """"auto" climbs back up a step at a time while the viewer keeps up."""
+        while True:
+            await asyncio.sleep(1)
+            now = time.monotonic()
+            for w in list(self.watches.values()):
+                if w.quality != "auto" or w.step is None or w.paused:
+                    continue
+                if w.stepped_up and now - w.stepped_up > 2 * PROBE_WINDOW:
+                    w.up_wait = self.UP_AFTER                  # that step held: back to the short wait
+                ceiling = RELAY_CEILING if path_info(w.s.conn)["via_relay"] else 0
+                quiet = now - max(w.step_changed, w.last_reset)
+                step = auto_step(w.step, ceiling, quiet, w.up_wait)
+                if step != w.step:
+                    w.step, w.step_changed, w.stepped_up = step, now, now
+                    w.resets.clear()
+                    self._attach(w)
 
     def _post_state(self, w, entry):
         info = entry.info

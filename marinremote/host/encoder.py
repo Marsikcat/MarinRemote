@@ -17,9 +17,16 @@ only when asked for (plus one every `gop` seconds as a safety net). Rate control
 NVENC's CBR pads every frame to the full rate (20 Mbit/s for a still desktop), capped VBR
 keeps the same ceiling — and the same latency bound — but a still screen costs almost nothing.
 
+A still screen costs nothing at all, in fact: when nothing changed, ddagrab hands out the
+previous picture again — the very same D3D11 texture — to keep its frame rate. Such a repeat is
+neither encoded nor sent (the viewer keeps showing the last picture), unless a keyframe is
+wanted: then it is encoded as one, so a keyframe never waits for the screen to change.
+"STAT encoded=N repeats=M" on stderr every few seconds says how many were skipped.
+
 The app ties this process to its own lifetime (a job object), so it never outlives MarinRemote.
 Exit codes: 0 the app hung up, 1 an error (the last stderr lines say which), 3 the picture
-changed size or format (start again with fresh settings).
+changed size or format (start again with fresh settings), 4 desktop duplication was lost
+(Windows took it back — start again; if that keeps happening, use GDI for this monitor).
 """
 
 import ctypes
@@ -33,6 +40,8 @@ from fractions import Fraction
 
 FRAME = struct.Struct("<IQB")
 EXIT_FORMAT = 3
+EXIT_LOST = 4
+STAT_EVERY = 5
 
 
 def _say(text):
@@ -58,6 +67,27 @@ def _now_us():
 
 class FormatChanged(Exception):
     pass
+
+
+class CaptureLost(Exception):
+    pass
+
+
+class Repeats:
+    """Tells a repeat of the previous picture from a new one: D3D11 frames that share the previous
+    frame's texture. The previous frame is held on to until the next one has come, so its texture
+    can't be handed out again for a new picture in between. Frames in system memory (GDI, x264,
+    tests) are never taken for repeats."""
+
+    def __init__(self):
+        self.prev = None
+        self.prev_tex = None
+
+    def __call__(self, frame):
+        tex = frame.planes[0].buffer_ptr if frame.format.name == "d3d11" and frame.planes else None
+        repeat = tex is not None and tex == self.prev_tex
+        self.prev, self.prev_tex = frame, tex
+        return repeat
 
 
 class Worker:
@@ -100,12 +130,15 @@ class Worker:
                     graph += f",scale=-2:{scale}:flags=bicubic"
                 if not nvenc:
                     graph += ",format=yuv420p"
-            try:
-                vin = av.open(graph, format="lavfi")
-                self.capture = "ddagrab"
-                return vin
-            except av.error.FFmpegError as e:
-                _say(f"INFO ddagrab недоступен ({e}) — захват через GDI")
+            for _ in range(3):                        # Windows may refuse a duplication for a moment
+                try:
+                    vin = av.open(graph, format="lavfi")
+                    self.capture = "ddagrab"
+                    return vin
+                except av.error.FFmpegError as e:
+                    error = e
+                    time.sleep(0.4)
+            _say(f"INFO ddagrab недоступен ({error}) — захват через GDI")
         self.capture = "gdigrab"
         return av.open("desktop", format="gdigrab",
                        options={"framerate": str(fps), "offset_x": str(src["x"]), "offset_y": str(src["y"]),
@@ -155,6 +188,7 @@ class Worker:
             return False
 
     def run(self):
+        import av
         from av.video.frame import PictureType
         if self.cfg["encoder"] == "nvenc" and not self.nvenc_free():
             self.cfg["encoder"] = "x264"           # the video card is busy: the processor encodes
@@ -177,14 +211,30 @@ class Worker:
         i = 0
         frame = first
         captured = {}
+        repeats = Repeats()
+        encoded = skipped = 0
+        stat_at = time.monotonic() + STAT_EVERY
         while not self.stopping.is_set():
             if i:
-                frame = next(frames)
+                try:
+                    frame = next(frames)
+                except av.error.FFmpegError as e:
+                    if self.capture == "ddagrab":
+                        raise CaptureLost(str(e)) from None
+                    raise
                 if paced:
                     time.sleep(max(0.0, t0 + i / self.fps - time.perf_counter()))
                 if frame.format.name != self.fmt or (frame.format.name == "d3d11"
                                                      and (frame.width, frame.height) != self.size):
                     raise FormatChanged(f"{frame.width}x{frame.height} {frame.format.name}")
+            if time.monotonic() >= stat_at:
+                _say(f"STAT encoded={encoded} repeats={skipped}")
+                stat_at = time.monotonic() + STAT_EVERY
+            if repeats(frame) and not self.key_wanted.is_set():
+                skipped += 1                          # the screen hasn't changed: nothing to send
+                i += 1
+                continue
+            encoded += 1
             captured[i] = _now_us()
             if reformat is not None:
                 frame = reformat.reformat(frame, width=self.size[0], height=self.size[1],
@@ -216,6 +266,9 @@ def main(arg):
     except FormatChanged as e:
         _say(f"FORMAT {e}")
         return EXIT_FORMAT
+    except CaptureLost as e:
+        _say(f"LOST {e}")
+        return EXIT_LOST
     except StopIteration:
         _say("захват экрана прекратился")
         return 1

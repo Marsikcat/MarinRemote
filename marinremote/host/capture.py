@@ -83,6 +83,7 @@ class Encoder:
         self.info = {}
         self.frames = 0
         self.bytes = 0
+        self.stats = {}             # what the worker last said: encoded / repeats (skipped) since it began
         self._err = []
         self._lock = threading.Lock()
         self._last_key = 0.0
@@ -157,6 +158,9 @@ class Encoder:
                 self.info = {"w": w, "h": h, "codec": codec, "capture": capture,
                              "encoder": "NVENC" if "nvenc" in codec else "x264 (процессор)"}
                 self.on_state("ok", dict(self.info))
+            elif line.startswith("STAT "):
+                self.stats = {k: int(v) for k, _, v in (part.partition("=") for part in line[5:].split())
+                              if v.isdigit()}
             elif line.startswith("INFO"):
                 print(f"encoder: {line}", flush=True)
             elif line:

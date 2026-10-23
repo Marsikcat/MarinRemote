@@ -54,8 +54,8 @@ def until(cond, timeout=20):
 def make_pair(tmp_path, receiver=VideoReceiver):
     QCoreApplication.instance() or QCoreApplication([])
     hs, vs = Settings(tmp_path / "h"), Settings(tmp_path / "v")
-    host = Node(hs["secret_key"], port=0, mode="lan", bind_host="127.0.0.1", lan=False)
-    viewer = Node(vs["secret_key"], port=0, mode="lan", bind_host="127.0.0.1", lan=False)
+    host = Node(hs.secret_key, port=0, mode="lan", bind_host="127.0.0.1", lan=False)
+    viewer = Node(vs.secret_key, port=0, mode="lan", bind_host="127.0.0.1", lan=False)
     host.start()
     viewer.start()
     core = HostCore(hs, host, Journal(tmp_path / "j.jsonl"), Yes())
@@ -86,19 +86,24 @@ def video_pair(tmp_path):
 
 
 class SlowReceiver(VideoReceiver):
-    """Reads its stream at a third of the frame rate: a viewer on a link too slow for the picture."""
+    """Reads its stream at a third of the frame rate: a viewer on a link too slow for the picture
+    (until `slow` is switched off — the link got better)."""
+
+    slow = True
 
     async def on_stream(self, header, rest, rs):
         if header.get("t") == "video":
             self.segments = getattr(self, "segments", 0) + 1
-        return await super().on_stream(header, rest, _Slow(rs))
+        return await super().on_stream(header, rest, _Slow(rs, self))
 
 
 class _Slow:
-    def __init__(self, rs):
-        self.rs = rs
+    def __init__(self, rs, owner):
+        self.rs, self.owner = rs, owner
 
     async def read(self, n):
+        if not self.owner.slow:
+            return await self.rs.read(n)
         await asyncio.sleep(0.1)
         return await self.rs.read(min(n, 2000))
 
@@ -214,6 +219,8 @@ class FakeSession:
 
 
 class FakeService:
+    UP_AFTER = 20
+
     def __init__(self, loop):
         self.net = type("N", (), {"spawn": staticmethod(lambda c: loop.create_task(c))})()
         self.keys = 0
@@ -276,3 +283,48 @@ def test_a_jam_here_drops_whole_frames():
         w.close()
 
     asyncio.run(scenario())
+
+
+def test_auto_step_rule():
+    from marinremote.host.video import auto_step
+    assert auto_step(2, 0, quiet_for=25, wait=20) == 1          # quiet long enough: one step up
+    assert auto_step(2, 0, quiet_for=5, wait=20) == 2           # not yet
+    assert auto_step(2, 2, quiet_for=999, wait=20) == 2         # already at the path's ceiling (relay)
+    assert auto_step(0, 0, quiet_for=999, wait=20) == 0
+
+
+def test_auto_climbs_back_up_once_the_viewer_keeps_up(tmp_path):
+    (s, rx, dec, events, svc), close = make_pair(tmp_path, SlowReceiver)
+    svc.UP_AFTER = 2
+    try:
+        until(lambda: svc.watches and next(iter(svc.watches.values())).step >= 1, 30)     # stepped down
+        rx.slow = False                                                                     # the link recovers
+        w = next(iter(svc.watches.values()))
+        until(lambda: w.step == 0, 30)                                                      # and back up
+        until(lambda: any(m["t"] == "video.state" and m.get("step") == 0 and m["state"] == "ok"
+                          for m in events.msgs[-5:]), 15)
+        n = dec.decoded
+        until(lambda: dec.decoded > n + 20, 15)                                             # the picture flows
+    finally:
+        close()
+
+
+def test_desktop_duplication_lost_twice_means_gdi_for_that_monitor(video_pair):
+    s, rx, dec, events, svc = video_pair
+    until(lambda: dec.decoded >= 10)
+    entry = next(iter(svc.entries.values()))
+    for _ in range(2):                           # the worker says "lost" twice in a row
+        until(lambda: entry.enc is not None and entry.info is not None)
+        lost = entry.enc
+        svc.net.submit(_call(svc._encoder_state, entry.key, lost, "ended", {"error": "lost", "code": 4})).result(5)
+        lost.stop()                              # (a real "lost" worker has already exited by itself)
+        until(lambda lost=lost: entry.enc is not None and entry.enc is not lost, 10)
+    assert entry.no_dda
+    assert svc._source(entry)["kind"] == "test"  # (a test monitor stays a test pattern)
+    n = dec.decoded
+    until(lambda: dec.decoded > n + 10, 20)       # and the picture carries on
+    assert not [m for m in events.msgs if m["t"] == "video.state" and m["state"] == "unavailable"]
+
+
+async def _call(fn, *args):
+    return fn(*args)

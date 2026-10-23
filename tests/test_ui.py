@@ -42,7 +42,7 @@ def window(app, tmp_path, autostart):
     from marinremote.ui.mainwindow import MainWindow
     theme.apply(app)
     s = Settings(tmp_path)
-    node = Node(s["secret_key"], port=0, mode="lan", bind_host="127.0.0.1", lan=False)
+    node = Node(s.secret_key, port=0, mode="lan", bind_host="127.0.0.1", lan=False)
     node.start()
     journal = Journal(tmp_path / "journal.jsonl")
     approver = QtApprover(node.net)

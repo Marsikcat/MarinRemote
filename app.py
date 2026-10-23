@@ -96,6 +96,11 @@ def main():
         _message(f"Не получается прочитать настройки MarinRemote ({e}).\n\nПохоже, файл держит другая "
                  f"программа. Попробуйте ещё раз через минуту.")
         return 1
+    if settings.identity_note == "unreadable":
+        _message("Ключ этого устройства зашифрован для другой учётной записи Windows или другого ПК — "
+                 "похоже, настройки скопировали сюда. Чужой ключ не используется: создан новый.\n\n"
+                 "Код подключения этого ПК изменился. Устройства, которые помнили его, должны добавить "
+                 "его заново.", 0x30)
 
     from marinremote.host.clipboard import ClipboardService
     from marinremote.host.core import HostCore
@@ -110,7 +115,7 @@ def main():
     from marinremote.ui.mainwindow import MainWindow
 
     theme.apply(app)
-    node = Node(settings["secret_key"], mode=settings["network_mode"])
+    node = Node(settings.secret_key, mode=settings["network_mode"])
     try:
         node.start()
     except Exception as e:

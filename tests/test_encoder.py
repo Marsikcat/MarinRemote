@@ -80,5 +80,21 @@ def test_real_monitor_capture():
     frames, asked, info = run_encoder("nvenc" if has_nvenc() else "x264", source=source,
                                       params={"fps": 60, "kbps": 20000, "h": None})
     assert info["capture"] == "ddagrab" and (info["w"], info["h"]) == (m["w"], m["h"])
+    # a still screen sends next to nothing (repeats are skipped), but the asked-for keyframe comes
     check_stream(frames, asked)
-    assert len(frames) > 100                                  # ~60 fps
+
+
+def test_repeats_are_told_apart_by_their_texture():
+    from types import SimpleNamespace
+
+    from marinremote.host.encoder import Repeats
+
+    def frame(fmt, ptr):
+        return SimpleNamespace(format=SimpleNamespace(name=fmt), planes=[SimpleNamespace(buffer_ptr=ptr)])
+    r = Repeats()
+    assert not r(frame("d3d11", 100))            # the first one is news
+    assert not r(frame("d3d11", 200))            # another texture: a new picture
+    assert r(frame("d3d11", 200))                # the same texture again: the screen didn't change
+    assert r(frame("d3d11", 200))
+    assert not r(frame("d3d11", 100))
+    assert not r(frame("bgra", 5)) and not r(frame("bgra", 5))   # system memory: never taken for repeats

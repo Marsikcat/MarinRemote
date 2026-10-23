@@ -55,8 +55,8 @@ def make(tmp_path):
 
     def _make(rights):
         hs, vs = Settings(tmp_path / f"h{len(made)}"), Settings(tmp_path / f"v{len(made)}")
-        host = Node(hs["secret_key"], port=0, mode="lan", bind_host="127.0.0.1", lan=False)
-        viewer = Node(vs["secret_key"], port=0, mode="lan", bind_host="127.0.0.1", lan=False)
+        host = Node(hs.secret_key, port=0, mode="lan", bind_host="127.0.0.1", lan=False)
+        viewer = Node(vs.secret_key, port=0, mode="lan", bind_host="127.0.0.1", lan=False)
         host.start()
         viewer.start()
         journal = Journal(tmp_path / f"j{len(made)}.jsonl")

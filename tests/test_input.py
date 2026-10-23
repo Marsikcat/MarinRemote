@@ -194,8 +194,8 @@ def until(cond, timeout=10):
 
 def setup(tmp_path, rights, probe=lambda: (None, "")):
     hs, vs = Settings(tmp_path / "h"), Settings(tmp_path / "v")
-    host = Node(hs["secret_key"], port=0, mode="lan", bind_host="127.0.0.1", lan=False)
-    viewer = Node(vs["secret_key"], port=0, mode="lan", bind_host="127.0.0.1", lan=False)
+    host = Node(hs.secret_key, port=0, mode="lan", bind_host="127.0.0.1", lan=False)
+    viewer = Node(vs.secret_key, port=0, mode="lan", bind_host="127.0.0.1", lan=False)
     host.start()
     viewer.start()
     journal = Journal(tmp_path / "j.jsonl")
