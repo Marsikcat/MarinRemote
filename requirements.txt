@@ -1,0 +1,5 @@
+PySide6-Essentials>=6.7
+iroh>=1.1
+av>=12
+numpy>=1.26
+pynacl>=1.5

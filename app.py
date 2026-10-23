@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""
+MarinRemote — remote access to a Windows PC (screen, mouse, keyboard, clipboard, files)
+with no servers of its own: QUIC through iroh, dialled by the PC's public key.
+
+    python app.py              open the app (this PC can be connected to; it can connect out)
+    python app.py --autostart  launched by Windows at logon (starts in the tray)
+
+MARINREMOTE_INSTANCE=1 (2, …) runs a test copy with its own ports and a data folder in %TEMP%.
+"""
+
+import os
+import sys
+import time
+import traceback
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+REQUIRED = ("PySide6", "av", "numpy", "iroh", "nacl")
+
+
+def _missing():
+    import importlib.util
+    return [m for m in REQUIRED if importlib.util.find_spec(m) is None]
+
+
+def _message(text, icon=0x10):
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, text, "MarinRemote", icon)
+    except Exception:
+        print(text)
+
+
+def _setup_logging(folder):
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "app.log"
+    try:
+        if path.stat().st_size > 2 * 1024 * 1024:       # keep one old log, not years of them
+            path.replace(folder / "app.old.log")
+    except OSError:
+        pass
+    log = open(path, "a", encoding="utf-8", buffering=1)
+    if sys.stdout is None or sys.stderr is None:   # pythonw has no console
+        sys.stdout = sys.stderr = log
+    log.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] start, pid {os.getpid()}\n")
+
+    def hook(exc_type, exc, tb):
+        log.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                  + "".join(traceback.format_exception(exc_type, exc, tb)))
+    sys.excepthook = hook
+
+
+def main():
+    missing = _missing()
+    if missing:
+        _message("Не установлены модули: " + ", ".join(missing) + "\n\nЗапустите setup.bat — он всё поставит.")
+        return 1
+    from marinremote.config import APP_NAME, DATA, INSTANCE, Settings
+    _setup_logging(DATA)
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtNetwork import QLocalServer, QLocalSocket
+    from PySide6.QtWidgets import QApplication
+
+    args = sys.argv[1:]
+    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setQuitOnLastWindowClosed(False)
+
+    # one copy per Windows user (and test instance): a second launch brings the window up
+    key = f"{APP_NAME}-{os.environ.get('USERNAME', 'user')}-{INSTANCE}"
+    sock = QLocalSocket()
+    sock.connectToServer(key)
+    if sock.waitForConnected(300):
+        sock.write(b"show")
+        sock.waitForBytesWritten(1000)
+        return 0
+    QLocalServer.removeServer(key)
+    server = QLocalServer()
+    server.listen(key)
+
+    try:
+        settings = Settings()
+    except PermissionError as e:
+        _message(f"Не получается прочитать настройки MarinRemote ({e}).\n\nПохоже, файл держит другая "
+                 f"программа. Попробуйте ещё раз через минуту.")
+        return 1
+
+    from marinremote.host.core import HostCore
+    from marinremote.journal import Journal
+    from marinremote.net import Node
+    from marinremote.ui import theme
+    from marinremote.ui.bridge import HostBridge, QtApprover
+    from marinremote.ui.mainwindow import MainWindow
+
+    theme.apply(app)
+    node = Node(settings["secret_key"], mode=settings["network_mode"])
+    try:
+        node.start()
+    except Exception as e:
+        _message(f"Не удалось запустить сеть MarinRemote: {e}")
+        return 1
+    journal = Journal(settings.folder / "journal.jsonl")
+    approver = QtApprover(node.net)
+    bridge = HostBridge()
+    core = HostCore(settings, node, journal, approver, events=bridge)
+    win = MainWindow(settings, node, core, journal, approver, bridge)
+
+    def on_second_instance():
+        conn = server.nextPendingConnection()
+        if conn:
+            conn.readyRead.connect(win.show_window)
+            conn.disconnected.connect(conn.deleteLater)
+    server.newConnection.connect(on_second_instance)
+
+    def on_quit():
+        win.shutdown()
+        core.shutdown()
+        node.stop()
+    app.aboutToQuit.connect(on_quit)
+
+    if "--autostart" not in args:
+        win.show()
+    print(f"ready: {node.id} port {node.port} data {settings.folder}", flush=True)
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
