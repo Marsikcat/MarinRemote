@@ -139,9 +139,11 @@ def switch_row(title, hint, checked, on_toggle):
     text.addWidget(label(title))
     if hint:
         text.addWidget(label(hint, "hint", wrap=True))
+    text.addStretch(1)
     lay.addLayout(text, 1)
     sw = Switch(checked)
     sw.toggled.connect(on_toggle)
     lay.addWidget(sw, 0, Qt.AlignTop)
     w.switch = sw
+    w.setMinimumHeight(w.sizeHint().height())     # wrapped hints under-report their height: never squeeze
     return w

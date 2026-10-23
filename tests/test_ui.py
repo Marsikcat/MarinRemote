@@ -63,7 +63,7 @@ def test_main_window_and_the_question_round_trip(app, tmp_path):
 
         # a journal entry shows up at the top of the table
         journal.write("kill_all", sessions=1)
-        pump(app, lambda: win.table.item(0, 1) is not None and "разорваны" in win.table.item(0, 1).text())
+        pump(app, lambda: win.journal_view.table.item(0, 1) is not None and "разорваны" in win.journal_view.table.item(0, 1).text())
         win.shutdown()
     finally:
         node.stop()

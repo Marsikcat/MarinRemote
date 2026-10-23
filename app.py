@@ -92,6 +92,7 @@ def main():
                  f"программа. Попробуйте ещё раз через минуту.")
         return 1
 
+    from marinremote.host.clipboard import ClipboardService
     from marinremote.host.core import HostCore
     from marinremote.host.files import FilesService
     from marinremote.host.input import InputService
@@ -100,6 +101,7 @@ def main():
     from marinremote.net import Node
     from marinremote.ui import theme
     from marinremote.ui.bridge import HostBridge, QtApprover
+    from marinremote.ui.clipboard import QtClipboard
     from marinremote.ui.mainwindow import MainWindow
 
     theme.apply(app)
@@ -114,7 +116,7 @@ def main():
     bridge = HostBridge()
     core = HostCore(settings, node, journal, approver, events=bridge)
     video = VideoService(core)
-    core.services += [video, InputService(core, video), FilesService(core)]
+    core.services += [video, InputService(core, video), FilesService(core), ClipboardService(core, QtClipboard())]
     win = MainWindow(settings, node, core, journal, approver, bridge)
 
     def on_second_instance():

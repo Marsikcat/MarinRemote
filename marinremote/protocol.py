@@ -16,7 +16,7 @@ import struct
 APP = "MarinRemote"
 ALPN = b"marinremote/1"
 PROTO = 1
-MAX_LINE = 1 << 20                  # control messages (clipboard text included)
+MAX_LINE = 5 << 20                  # control messages (clipboard text, up to 1M characters, included)
 STREAM_MAGIC = b"MRS1"
 MAX_HEADER = 4096
 

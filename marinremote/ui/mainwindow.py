@@ -11,18 +11,17 @@ from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog,
                                QFrame, QHBoxLayout, QInputDialog, QLineEdit, QMainWindow, QMenu,
                                QMessageBox, QPushButton, QScrollArea, QStackedWidget,
-                               QSystemTrayIcon, QTableWidget, QTableWidgetItem, QHeaderView,
-                               QVBoxLayout, QWidget)
+                               QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from .. import auth
 from ..codes import fingerprint, make_code, parse_code, pretty, relay_label
-from ..config import INSTANCE, VERSION
+from ..config import DISCOVERY_PORT, INSTANCE, PEER_PORT, VERSION
 from ..hotkeys import KillHotkey, Recorder, describe
-from ..journal import EVENTS
 from ..protocol import RIGHT_NAMES, RIGHTS, describe_rights
-from ..system import is_elevated
+from ..system import autostart_enabled, is_elevated, open_firewall, set_autostart
 from . import icons
 from .approve import ApproveDialog
+from .journalview import JournalView
 from .overlay import Indicators
 from .session_window import SessionWindow
 from .theme import GREEN, YELLOW, mono_font, style_window
@@ -66,6 +65,7 @@ def page(title, subtitle=""):
     lay = QVBoxLayout(inner)
     lay.setContentsMargins(28, 24, 28, 24)
     lay.setSpacing(14)
+    lay.setSizeConstraint(QVBoxLayout.SetMinimumSize)     # taller than the window: scroll, don't squeeze
     lay.addWidget(label(title, "h1"))
     if subtitle:
         lay.addWidget(label(subtitle, "muted", wrap=True))
@@ -198,12 +198,44 @@ class MainWindow(QMainWindow):
         cl.addWidget(self.kill_hint)
         lay.addWidget(c)
 
+        c, cl = card()
+        cl.addWidget(label("ЗАПУСК И СЕТЬ", "caption"))
+        cl.addWidget(switch_row("Запускать вместе с Windows",
+                                "MarinRemote стартует в трее при входе в Windows — к этому ПК можно подключиться.",
+                                autostart_enabled(), self._set_autostart))
+        cl.addWidget(switch_row("Закрытие окна сворачивает в трей",
+                                "Иначе закрытие окна выходит из программы и обрывает подключения.",
+                                self.s["close_to_tray"], lambda on: self._set("close_to_tray", on)))
+        self.firewall_btn = button("Открыть порты в брандмауэре", "small", self._open_firewall,
+                                   tip=f"Входящие UDP {DISCOVERY_PORT} и {PEER_PORT} — Windows спросит права администратора")
+        self.firewall_note = label("Нужно только для прямых подключений в локальной сети, если брандмауэр их "
+                                   "не пропустил. Через интернет всё работает и так.", "hint", wrap=True)
+        cl.addWidget(hbox(self.firewall_btn, None))
+        cl.addWidget(self.firewall_note)
+        lay.addWidget(c)
+
         if not is_elevated():
             lay.addWidget(note("MarinRemote работает с правами обычного пользователя. Окнами программ, "
                                "запущенных от имени администратора, запросом UAC и экраном входа "
                                "удалённо управлять нельзя — это ограничение Windows."))
         lay.addStretch(1)
         return area
+
+    def _set_autostart(self, on):
+        try:
+            set_autostart(on)
+        except OSError as e:
+            QMessageBox.warning(self, "Автозапуск", f"Не получилось: {e}")
+
+    def _open_firewall(self):
+        self.firewall_btn.setEnabled(False)
+        self.firewall_note.setText("Ждём подтверждения Windows…")
+
+        def done(ok):
+            self.firewall_btn.setEnabled(True)
+            self.firewall_note.setText("Порты открыты." if ok is True else
+                                       "Не получилось — права администратора не дали или окно закрыли.")
+        in_thread(open_firewall, done)
 
     def _code(self):
         return make_code(self.node.id, self.node.addr.get("relay"))
@@ -614,41 +646,14 @@ class MainWindow(QMainWindow):
 
     # ═════════════════════════ journal ═════════════════════════════
     def _page_journal(self):
-        area, lay = page("Журнал", "Кто и когда подключался к этому ПК, с какими правами, "
-                                   "что было отклонено. Хранится в journal.jsonl в папке данных.")
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Время", "Событие", "Устройство", "Подробности"])
-        self.table.verticalHeader().hide()
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        hdr = self.table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(3, QHeaderView.Stretch)
-        self.table.setMinimumHeight(420)
-        lay.addWidget(self.table, 1)
-        for entry in self.journal.read(500):
-            self._journal_add(entry)
+        area, lay = page("Журнал", "Кто и когда подключался к этому ПК, с какими правами, что было "
+                                   "отклонено, какие файлы передавались и что было заблокировано.")
+        self.journal_view = JournalView(self.journal)
+        lay.addWidget(self.journal_view, 1)
         return area
 
     def _journal_add(self, e):
-        details = []
-        for k in ("rights", "reason", "how", "what", "mode", "remember", "via", "seconds", "sessions", "action",
-                  "path", "to", "size", "result", "offset"):
-            v = e.get(k)
-            if v in (None, "", []):
-                continue
-            if k == "rights":
-                v = describe_rights(v)
-            details.append(f"{k}: {v}")
-        who = f"{e.get('name', '')} {e.get('fp', '')}".strip()
-        self.table.insertRow(0)
-        for col, text in enumerate((e.get("ts", ""), EVENTS.get(e.get("event"), e.get("event", "")),
-                                    who, " · ".join(details))):
-            self.table.setItem(0, col, QTableWidgetItem(str(text)))
-        if self.table.rowCount() > 2000:
-            self.table.removeRow(self.table.rowCount() - 1)
+        self.journal_view.add(e)
 
     # ═════════════════════════ confirmation ════════════════════════
     def _ask(self, request):

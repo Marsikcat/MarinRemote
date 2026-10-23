@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QInputDialog, QSt
                                QVBoxLayout, QWidget)
 
 from ..codes import fingerprint
+from ..host.clipboard import MAX_TEXT as MAX_CLIP
 from ..host.capture import QUALITY
 from ..protocol import AUTH_REASONS, describe_rights, wait_text
 from ..viewer.decoder import Decoder
@@ -30,6 +31,7 @@ from ..viewer.session import END_TEXT, ViewerSession
 from ..viewer.video import VideoReceiver
 from . import icons
 from .bridge import ViewerBridge
+from .clipboard import QtClipboard
 from .filemanager import FileManager
 from .theme import GREEN, RED, YELLOW, style_window
 from .videowidget import VideoWidget, now_us
@@ -108,6 +110,10 @@ class SessionWindow(QWidget):
                                    "Чтобы вернуть их своему ПК, щёлкните вне окна или выключите это.")
         self.keys_btn.setCheckable(True)
         self.keys_btn.setChecked(True)
+        self.clip_btn = button("Буфер обмена", "small", tip="Скопированный здесь текст вставляется там, и наоборот.\n"
+                                                           "Уходит только то, что скопировано во время сеанса.")
+        self.clip_btn.setCheckable(True)
+        self.clip_btn.setChecked(True)
         self.files_btn = button("Файлы", "small", self._open_files,
                                 tip="Файлы этого и удалённого ПК; файлы можно и просто перетащить на картинку")
         self.stats_btn = button("Статистика", "small", self._toggle_stats)
@@ -117,8 +123,8 @@ class SessionWindow(QWidget):
         self.save_btn = button("Сохранить в контакты", "small", self._save_contact)
         self.retry_btn = button("Подключиться снова", "small", self._retry)
         self.leave_btn = button("Отключить", "danger", self.close)
-        for w in (self.monitor_box, self.quality_box, self.control_btn, self.keys_btn, self.files_btn,
-                  self.stats_btn, self.full_btn, self.save_btn, self.retry_btn, self.leave_btn):
+        for w in (self.monitor_box, self.quality_box, self.control_btn, self.keys_btn, self.clip_btn,
+                  self.files_btn, self.stats_btn, self.full_btn, self.save_btn, self.retry_btn, self.leave_btn):
             w.setFocusPolicy(Qt.NoFocus)        # keys stay with the picture (and the remote PC)
             b.addWidget(w)
         lay.addWidget(self.bar)
@@ -158,6 +164,8 @@ class SessionWindow(QWidget):
         self.input = None
         self.files = None
         self.file_manager = None
+        self.board = QtClipboard()
+        self.board.on_change = self._local_clip
         self._hooked = None
         self.setAcceptDrops(True)
         self._start(password)
@@ -212,6 +220,7 @@ class SessionWindow(QWidget):
         for w in (self.control_btn, self.keys_btn):
             w.setVisible(watching and "control" in session.rights)
         self.files_btn.setVisible(st in ("connected", "reconnecting") and "files" in session.rights)
+        self.clip_btn.setVisible(st in ("connected", "reconnecting") and "clipboard" in session.rights)
         self.monitor_box.setVisible(watching and self.monitor_box.count() > 1)
         if st != "connected":
             self.warn.hide()
@@ -278,6 +287,10 @@ class SessionWindow(QWidget):
             self.video.update()
         elif t == "cursor":
             self.video.set_cursor(msg)
+        elif t == "clip":
+            text = msg.get("text")
+            if self.clip_btn.isChecked() and isinstance(text, str) and 0 < len(text) <= MAX_CLIP:
+                self.board.set_text(text)
         elif t == "warn":
             code = msg.get("code")
             text = WARNINGS.get(code)
@@ -349,6 +362,13 @@ class SessionWindow(QWidget):
         if self.input is not None:
             self.input.key(scan, ext, down, vk)
         return True
+
+    # ── the clipboard ───────────────────────────────────────────────
+    def _local_clip(self, text):
+        s = self.session
+        if (s is not None and s.state == "connected" and "clipboard" in s.rights and self.clip_btn.isChecked()
+                and len(text) <= MAX_CLIP):
+            s.post({"t": "clip", "text": text})
 
     # ── files ───────────────────────────────────────────────────────
     def _open_files(self):
