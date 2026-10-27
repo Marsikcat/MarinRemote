@@ -1,6 +1,6 @@
 # The installer, built on GitHub's Windows machine: by hand (Actions → build → Run workflow)
-# or for a tag v*. The result is in the run's artifacts. No release is published and nothing is
-# signed — signed updates are stage 2.
+# or for a tag v*. The result is in the run's artifacts. Releases (what the app updates itself
+# from) are published and signed on the PC that holds the release key: tools/release.py.
 name: build
 
 on:

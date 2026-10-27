@@ -137,3 +137,28 @@ def test_a_missing_root_is_simply_not_offered(tmp_path):
     roots = Roots([{"id": "gone", "path": str(tmp_path / "nope"), "label": "x"},
                    {"id": "here", "path": str(tmp_path), "label": "y"}])
     assert [r["id"] for r in roots.listing()] == ["here"]
+
+
+def test_every_drive_as_a_root():
+    from marinremote.host.fs import drive_roots
+    system = os.environ.get("SystemDrive", "C:")[0].upper()
+    drives = drive_roots()
+    assert system in [d["id"] for d in drives]
+    roots = Roots(drives)
+    assert os.path.normcase(roots.resolve(f"{system}/Windows")) == os.path.normcase(os.environ["SystemRoot"])
+    for bad in (f"{system}/..", f"{system}:/Windows", f"{system}/Windows/../..", system + "\\..\\" + system):
+        with pytest.raises(FsError):
+            roots.resolve(bad)
+
+
+def test_files_offer_every_drive_only_when_allowed(tmp_path):
+    from types import SimpleNamespace
+    from marinremote.host.files import FilesService
+    s = {"roots": [{"id": "home", "path": str(tmp_path), "label": "Дом"}], "files_all_drives": False}
+    svc = FilesService(SimpleNamespace(net=None, s=s))
+    assert [r["id"] for r in svc.roots().listing()] == ["home"]
+    s["files_all_drives"] = True
+    ids = [r["id"] for r in svc.roots().listing()]
+    assert ids[0] == "home" and os.environ.get("SystemDrive", "C:")[0].upper() in ids
+    s["files_all_drives"] = False
+    assert [r["id"] for r in svc.roots().listing()] == ["home"]

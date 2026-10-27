@@ -16,7 +16,7 @@ from .. import protocol as P
 from ..net import stop_stream
 from ..transfer import PRIORITY, host_temp_name, receive_file, send_file, unique_name
 from .core import Service
-from .fs import FsError, Roots, check_name
+from .fs import FsError, Roots, check_name, drive_mask, drive_roots
 
 MAX_ACTIVE = 8          # transfers at once per session
 
@@ -41,9 +41,15 @@ class FilesService(Service):
         self.cancelled = set()   # (sid, x) the viewer cancelled (rather than lost)
 
     def roots(self):
-        snapshot = json.dumps(self.s["roots"] or [], sort_keys=True)
+        """The allowed folders — and, if the person here allowed it, every drive there is now."""
+        every = bool(self.s["files_all_drives"])
+        snapshot = json.dumps([self.s["roots"] or [], every and drive_mask()], sort_keys=True)
         if self._roots[0] != snapshot:
-            self._roots = (snapshot, Roots(self.s["roots"] or []))
+            items = list(self.s["roots"] or [])
+            if every:
+                taken = {os.path.normcase(r["path"].rstrip("\\")) for r in items}
+                items += [d for d in drive_roots() if os.path.normcase(d["path"].rstrip("\\")) not in taken]
+            self._roots = (snapshot, Roots(items))
         return self._roots[1]
 
     # ── messages ────────────────────────────────────────────────────

@@ -18,6 +18,11 @@ ROOT = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resol
 BUNDLE = Path(getattr(sys, "_MEIPASS", ROOT))
 VERSION = (BUNDLE / "VERSION").read_text(encoding="utf-8").strip()
 
+# Updates: the GitHub releases of this repository, installers signed with this key (Ed25519; the
+# secret half stays on the PC that publishes releases — tools/sign.py)
+REPO = "Marsikcat/MarinRemote"
+RELEASE_KEY = "901aea90e5de0c1f2d51276a43673babc3776e4c6c6d27724810da5de034c35e"
+
 # A test copy on the same PC (MARINREMOTE_INSTANCE=1, 2…) gets its own ports and a throwaway
 # data folder in %TEMP%: the real profile (instance 0) is never touched by it.
 INSTANCE = int(os.environ.get("MARINREMOTE_INSTANCE", "0") or 0)
@@ -70,6 +75,8 @@ DEFAULTS = {
     "trusted": {},
     "blocked": {},              # key -> {name, when}
     "roots": None,              # [{id, path, label}] — folders a remote may reach; None = home
+    "files_all_drives": False,  # …and every drive of this PC (D:, a USB stick…) as it comes and goes
+    "check_updates": True,      # ask GitHub for a new version at start and twice a day
     "kill_hotkey": {"vk": 0x7B, "mods": ["ctrl", "shift", "alt"]},    # Ctrl+Shift+Alt+F12
     # ── connecting to other PCs ──
     "contacts": {},             # key -> {name, relay, addrs, added, last}

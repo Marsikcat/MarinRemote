@@ -13,9 +13,10 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QMessageBox, QPushButton, QScrollArea, QStackedWidget,
                                QSystemTrayIcon, QVBoxLayout, QWidget)
 
-from .. import auth
+from .. import auth, updater
 from ..codes import fingerprint, make_code, make_link, parse_code, pretty, relay_label
 from ..config import DISCOVERY_PORT, INSTANCE, PEER_PORT, VERSION
+from ..host.fs import drive_roots
 from ..hotkeys import KillHotkey, Recorder, describe
 from ..protocol import RIGHT_NAMES, RIGHTS, describe_rights
 from ..system import autostart_enabled, is_elevated, open_firewall, set_autostart
@@ -60,6 +61,10 @@ class NodeSignals(QObject):
     changed = Signal(str)               # "addr" | "lan" (from the network threads)
 
 
+class UpdateProgress(QObject):
+    changed = Signal(str)               # what to show while the update downloads (from its thread)
+
+
 def page(title, subtitle=""):
     """A scrollable page: (scroll area, its vertical layout)."""
     inner = QWidget()
@@ -96,6 +101,9 @@ class MainWindow(QMainWindow):
         self.dialogs = {}                 # request id -> ApproveDialog
         self.viewers = {}                 # remote key -> SessionWindow
         self._tray_told = False
+        self._tray_click = None           # what a click on the tray's next message opens
+        self.update_info = None
+        self._update_told = None
         self.setWindowTitle("MarinRemote" + (f" — экземпляр {INSTANCE}" if INSTANCE else ""))
         self.setWindowIcon(icons.app_icon())
         self.resize(980, 700)
@@ -211,6 +219,82 @@ class MainWindow(QMainWindow):
                                "удалённо управлять нельзя — это ограничение Windows."))
         lay.addStretch(1)
         return area
+
+    # ── updates ─────────────────────────────────────────────────────
+    def _check_updates(self, quiet=True):
+        """quiet: the automatic check — says something only when there is a new version."""
+        if quiet and not self.s["check_updates"]:
+            return
+        if not quiet:
+            self.update_check_btn.setEnabled(False)
+            self.update_label.setText("Проверяем…")
+
+        def done(info):
+            self.update_check_btn.setEnabled(True)
+            if isinstance(info, Exception):
+                if not quiet:
+                    self.update_label.setText(f"Не удалось проверить: {info}")
+                return
+            self._show_update(info, quiet)
+        in_thread(updater.check, done)
+
+    def _show_update(self, info, quiet):
+        self.update_info = info
+        if not info["available"]:
+            self.update_label.setText(f"Установлена версия {VERSION} — это последняя.")
+            self.update_btn.hide()
+            return
+        link = f"<a href='{info['url']}'>что нового</a>"
+        if updater.can_install():
+            self.update_label.setText(f"Вышла версия <b>{info['latest']}</b> ({link}). Установлена {VERSION}.")
+            self.update_btn.setText(f"Установить {info['latest']}")
+        else:
+            self.update_label.setText(f"Вышла версия <b>{info['latest']}</b> ({link}). Эта копия запущена не "
+                                      f"из установленной программы — обновите её сами.")
+            self.update_btn.setText("Открыть страницу выпуска")
+        self.update_btn.setEnabled(True)
+        self.update_btn.show()
+        if quiet and self._update_told != info["latest"]:
+            self._update_told = info["latest"]
+            self._tray_click = self.show_settings
+            self.tray.showMessage("MarinRemote", f"Вышла версия {info['latest']}. Установить — в «Настройках».",
+                                  icons.app_icon(), 8000)
+
+    def _install_update(self):
+        info = self.update_info
+        if not updater.can_install():
+            os.startfile(info["url"])
+            return
+        if self.sessions and QMessageBox.question(
+                self, "Обновление", f"К этому ПК сейчас подключены ({', '.join(s['name'] for s in self.sessions)}). "
+                                    f"MarinRemote перезапустится, и сеансы прервутся. Продолжить?") != QMessageBox.Yes:
+            return
+        self.update_btn.setEnabled(False)
+        self.update_check_btn.setEnabled(False)
+        self.update_label.setText(f"Скачиваем {info['latest']}…")
+        progress = UpdateProgress()
+        progress.changed.connect(lambda text: self.update_label.setText(text))
+
+        def fetch():
+            def tick(done, total):
+                if total:
+                    progress.changed.emit(f"Скачиваем {info['latest']}… {done * 100 // total}%")
+            return updater.download(info, tick)
+
+        def done(result):
+            if isinstance(result, Exception):
+                self.update_label.setText(f"Обновление не установлено: {result}")
+                self.update_btn.setEnabled(True)
+                self.update_check_btn.setEnabled(True)
+                return
+            self.update_label.setText("Подпись проверена. Устанавливаем — MarinRemote перезапустится…")
+            if updater.install():
+                QTimer.singleShot(300, QApplication.quit)
+            else:
+                self.update_label.setText("Скачанный установщик изменился, пока ждал, — установка отменена.")
+                self.update_btn.setEnabled(True)
+        self._progress = progress
+        in_thread(fetch, done)
 
     def _open_firewall(self):
         self.firewall_btn.setEnabled(False)
@@ -564,7 +648,13 @@ class MainWindow(QMainWindow):
         cl.addWidget(hbox(add_root, None))
         cl.addWidget(label("Устройства с правом «файлы» видят только эти папки — и ничего выше или рядом "
                            "с ними, даже по ярлыкам и ссылкам.", "hint", wrap=True))
-        self.access_widgets.append(add_root)
+        self.drives_row = switch_row(
+            "Все диски этого ПК",
+            "C:, D:, флешки, сетевые диски — сразу все, и новые тоже, как только появятся. Файлы Windows "
+            "и чужих учётных записей всё равно защищены: программа работает с вашими правами.",
+            self.s["files_all_drives"], self._set_all_drives)
+        cl.addWidget(self.drives_row)
+        self.access_widgets += [add_root, self.drives_row]
         lay.addWidget(c)
 
         c, cl = card()
@@ -619,7 +709,10 @@ class MainWindow(QMainWindow):
 
         clear_layout(self.roots_box)
         roots = list(self.s["roots"] or [])
-        if not roots:
+        self.drives_row.switch.setChecked(self.s["files_all_drives"])
+        if self.s["files_all_drives"]:
+            self.roots_box.addWidget(label("<b>Все диски</b> · " + ", ".join(d["id"] + ":" for d in drive_roots())))
+        if not roots and not self.s["files_all_drives"]:
             self.roots_box.addWidget(label("Нет — файлы этого ПК удалённо недоступны.", "muted"))
         for r in roots:
             text = label(f"<b>{r.get('label', '')}</b> · {r.get('path', '')}")
@@ -652,6 +745,13 @@ class MainWindow(QMainWindow):
         roots.append({"id": rid, "path": path, "label": label_text})
         self.s.set("roots", roots)
         self.journal.write("roots", action="add", path=path)
+        self._refresh_access()
+
+    def _set_all_drives(self, on):
+        if on == bool(self.s["files_all_drives"]):
+            return
+        self.s.set("files_all_drives", on)
+        self.journal.write("roots", action="all_drives_on" if on else "all_drives_off")
         self._refresh_access()
 
     def _remove_root(self, rid):
@@ -747,6 +847,23 @@ class MainWindow(QMainWindow):
         lay.addWidget(c)
 
         c, cl = card()
+        cl.addWidget(label("ОБНОВЛЕНИЯ", "caption"))
+        self.update_label = label(f"Установлена версия {VERSION}.", wrap=True)
+        self.update_label.setTextFormat(Qt.RichText)
+        self.update_label.setOpenExternalLinks(True)
+        cl.addWidget(self.update_label)
+        self.update_check_btn = button("Проверить", "small", lambda: self._check_updates(quiet=False))
+        self.update_btn = button("", None, self._install_update)
+        self.update_btn.hide()
+        cl.addWidget(hbox(self.update_check_btn, self.update_btn, None))
+        cl.addWidget(switch_row("Проверять обновления сами",
+                                "При запуске и дважды в день MarinRemote спрашивает GitHub, нет ли новой "
+                                "версии, и говорит о ней. Ставится она только по вашей кнопке и только с "
+                                "подписью MarinRemote.", self.s["check_updates"],
+                                lambda on: self._set("check_updates", on)))
+        lay.addWidget(c)
+
+        c, cl = card()
         cl.addWidget(label("О ПРОГРАММЕ", "caption"))
         cl.addWidget(label(f"MarinRemote {VERSION}" + (f" · тестовый экземпляр {INSTANCE}" if INSTANCE else "")))
         cl.addWidget(label(f"Данные: {self.s.folder}", "hint", wrap=True, selectable=True))
@@ -826,9 +943,20 @@ class MainWindow(QMainWindow):
         menu.aboutToShow.connect(self._sync_autostart)
         self.tray.setContextMenu(menu)
         self.tray_menu = menu
+        self.tray.messageClicked.connect(self._tray_message_clicked)
         self.tray.activated.connect(lambda reason: self.show_window()
                                     if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick) else None)
         self.tray.show()
+
+    def _tray_message_clicked(self):
+        action, self._tray_click = self._tray_click, None
+        (action or self.show_window)()
+
+    def start_update_checks(self):
+        """At start (a little later, the network first) and twice a day."""
+        QTimer.singleShot(20_000, self._check_updates)
+        self.update_timer = QTimer(self, interval=12 * 3600 * 1000, timeout=self._check_updates)
+        self.update_timer.start()
 
     def show_window(self):
         self.showNormal()

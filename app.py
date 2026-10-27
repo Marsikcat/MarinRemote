@@ -171,6 +171,7 @@ def main():
     app.aboutToQuit.connect(on_quit)
 
     register_links()
+    win.start_update_checks()
     if "--autostart" not in args or not settings["start_minimized"]:
         win.show()
     if link:

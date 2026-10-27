@@ -194,3 +194,18 @@ def test_pairing_from_both_windows(app, window, tmp_path, autostart):
     finally:
         win_a.shutdown()
         node_a.stop()
+
+
+def test_settings_tell_about_a_new_version(app, window):
+    win, *_ = window
+    info = {"current": "0.2.0", "latest": "0.3.0", "available": True, "url": "https://example/tag",
+            "title": "MarinRemote 0.3.0", "notes": "", "date": "", "download": "", "signature": ""}
+    win._show_update(info, quiet=False)
+    assert "0.3.0" in win.update_label.text() and not win.update_btn.isHidden()
+    assert win.update_btn.text() == "Открыть страницу выпуска"         # not an installed copy
+    win._show_update(dict(info, available=False, latest="0.2.0"), quiet=False)
+    assert "последняя" in win.update_label.text() and win.update_btn.isHidden()
+    win.drives_row.switch.setChecked(True)                             # «Все диски этого ПК»
+    assert win.s["files_all_drives"] is True
+    win.drives_row.switch.setChecked(False)
+    assert [e["action"] for e in win.journal.read() if e["event"] == "roots"] == ["all_drives_on", "all_drives_off"]

@@ -40,6 +40,12 @@ _k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p, wt
 _k32.CreateFileW.restype = wt.HANDLE
 _k32.GetFinalPathNameByHandleW.argtypes = [wt.HANDLE, wt.LPWSTR, wt.DWORD, wt.DWORD]
 _k32.CloseHandle.argtypes = [wt.HANDLE]
+_k32.GetDriveTypeW.argtypes = [wt.LPCWSTR]
+_k32.GetVolumeInformationW.argtypes = [wt.LPCWSTR, wt.LPWSTR, wt.DWORD, ctypes.c_void_p, ctypes.c_void_p,
+                                       ctypes.c_void_p, wt.LPWSTR, wt.DWORD]
+DRIVE_REMOVABLE, DRIVE_FIXED, DRIVE_REMOTE, DRIVE_CDROM, DRIVE_RAMDISK = 2, 3, 4, 5, 6
+DRIVE_KINDS = {DRIVE_FIXED: "Локальный диск", DRIVE_REMOVABLE: "Съёмный диск", DRIVE_REMOTE: "Сетевой диск",
+               DRIVE_CDROM: "Дисковод", DRIVE_RAMDISK: "RAM-диск"}
 
 
 class FsError(Exception):
@@ -128,6 +134,35 @@ def inside(path, root):
     """Is a final path the root itself or below it? (case-insensitive, as Windows is)"""
     p, r = os.path.normcase(path.rstrip("\\")), os.path.normcase(root.rstrip("\\"))
     return p == r or p.startswith(r + "\\")
+
+
+# ── drives ─────────────────────────────────────────────────────────
+def drive_mask():
+    """Which drive letters exist now (a bit per letter): cheap enough to ask every time."""
+    return _k32.GetLogicalDrives()
+
+
+def drive_roots():
+    """Every drive of this PC as a root: {"id": "D", "path": "D:\\", "label": "Локальный диск (D:) Data"}.
+    Volume names are asked of local drives only — a network or optical one may take seconds."""
+    out = []
+    mask = drive_mask()
+    for i in range(26):
+        if not mask & (1 << i):
+            continue
+        letter = chr(ord("A") + i)
+        path = f"{letter}:\\"
+        kind = _k32.GetDriveTypeW(path)
+        if kind not in DRIVE_KINDS:
+            continue
+        name = ""
+        if kind in (DRIVE_FIXED, DRIVE_REMOVABLE, DRIVE_RAMDISK):
+            buf = ctypes.create_unicode_buffer(261)
+            if _k32.GetVolumeInformationW(path, buf, 261, None, None, None, None, 0):
+                name = buf.value
+        out.append({"id": letter, "path": path,
+                    "label": f"{DRIVE_KINDS[kind]} ({letter}:)" + (f" {name}" if name else "")})
+    return out
 
 
 # ── the roots ──────────────────────────────────────────────────────

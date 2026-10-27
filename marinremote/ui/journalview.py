@@ -71,6 +71,7 @@ def details(e):
     if e.get("action"):
         out.append({"mkdir": "новая папка", "rename": "переименование", "delete": "в корзину",
                     "add": "добавлена", "remove": "убрана", "set": "задан", "cleared": "убран",
+                    "all_drives_on": "все диски открыты", "all_drives_off": "все диски закрыты",
                     "lock": "заблокировать экран", "restart": "перезагрузить", "shutdown": "выключить",
                     "cancel": "отменено " + ("на этом ПК" if e.get("by") == "host" else "зрителем")
                     }.get(e["action"], e["action"]))
