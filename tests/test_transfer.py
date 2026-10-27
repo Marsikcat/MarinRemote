@@ -280,3 +280,16 @@ def test_without_the_files_right_nothing_happens(tmp_path, monkeypatch):
         assert {e["what"] for e in p.events("violation")} >= {"fs.list", "put"}
     finally:
         p.close()
+
+
+def test_every_drive_reaches_the_viewer_once_allowed(pair):
+    s, fc = pair.connect()
+    first = fc.request({"t": "fs.roots"}).result(5)
+    assert first["all_drives"] is False and [r["id"] for r in first["roots"]] == ["home"]
+    pair.hs.set("files_all_drives", True)                 # switched on at the host
+    system = os.environ.get("SystemDrive", "C:")[0].upper()
+    after = fc.request({"t": "fs.roots"}).result(5)
+    assert after["all_drives"] is True and system in [r["id"] for r in after["roots"]]
+    listing = fc.request({"t": "fs.list", "path": system}).result(5)
+    assert listing["ok"] and any(e["n"].lower() == "windows" for e in listing["entries"])
+    assert not fc.request({"t": "fs.list", "path": f"{system}/.."}).result(5)["ok"]

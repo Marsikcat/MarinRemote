@@ -92,7 +92,7 @@ class FilesService(Service):
         roots = self.roots()
         try:
             if t == "fs.roots":
-                result = {"roots": roots.listing()}
+                result = {"roots": roots.listing(), "all_drives": bool(self.s["files_all_drives"])}
             elif t == "fs.list":
                 result = {"path": msg.get("path"), "entries": await asyncio.to_thread(roots.list, msg.get("path"))}
             elif t == "fs.mkdir":

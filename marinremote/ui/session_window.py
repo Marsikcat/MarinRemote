@@ -425,7 +425,7 @@ class SessionWindow(QWidget):
     # ── files ───────────────────────────────────────────────────────
     def _open_files(self):
         if self.file_manager is None:
-            self.file_manager = FileManager(self.files, self._name())
+            self.file_manager = FileManager(self.files, self._name(), self.session.host.get("ver", ""))
             self.file_manager.destroyed.connect(self._files_closed)
         self.file_manager.showNormal()
         self.file_manager.raise_()

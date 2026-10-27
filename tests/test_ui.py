@@ -209,3 +209,35 @@ def test_settings_tell_about_a_new_version(app, window):
     assert win.s["files_all_drives"] is True
     win.drives_row.switch.setChecked(False)
     assert [e["action"] for e in win.journal.read() if e["event"] == "roots"] == ["all_drives_on", "all_drives_off"]
+
+
+def test_file_manager_says_where_other_folders_are_opened(app):
+    from concurrent.futures import Future
+    from marinremote.ui.filemanager import FileManager
+
+    class Files:
+        def __init__(self, all_drives):
+            self.all_drives = all_drives
+
+        def request(self, msg):
+            f = Future()
+            f.set_result({"ok": True, "roots": [{"id": "home", "label": "Папка пользователя"}],
+                          "all_drives": self.all_drives} if msg["t"] == "fs.roots" else {"ok": True, "entries": []})
+            return f
+
+        def snapshot(self):
+            return []
+
+        def clear_finished(self):
+            pass
+
+    for ver, all_drives, says in (("0.1.0", None, "обновите его до 0.2.0"), ("0.2.0", False, "заблокированы"),
+                                  ("0.2.0", True, None)):
+        fm = FileManager(Files(all_drives), "DESKTOP-NFT63EP", ver)
+        pump(app, lambda fm=fm: fm.root_box.count() == 1)
+        if says is None:
+            assert fm.remote_hint.isHidden()
+        else:
+            assert not fm.remote_hint.isHidden() and "Все диски этого ПК" in fm.remote_hint.text()
+            assert says in fm.remote_hint.text()
+        fm.close()

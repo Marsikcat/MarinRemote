@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout, QHeade
                                QLabel, QLineEdit, QMessageBox, QProgressBar, QSplitter, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
+from ..updater import parse_version
 from ..viewer.files import human_speed, join
 from . import icons
 from .theme import style_window
@@ -103,9 +104,10 @@ class FileTable(QTableWidget):
 
 
 class FileManager(QWidget):
-    def __init__(self, files, host_name):
+    def __init__(self, files, host_name, host_ver=""):
         super().__init__(None, Qt.Window)
         self.files = files
+        self.host_name, self.host_ver = host_name, host_ver
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setObjectName("Root")
         self.setWindowTitle(f"Файлы — {host_name}")
@@ -165,6 +167,9 @@ class FileManager(QWidget):
         self.remote.opened.connect(self._remote_opened)
         self.remote.dropped.connect(self._dropped_there)
         rv.addWidget(self.remote, 1)
+        self.remote_hint = label("", "hint", wrap=True)
+        self.remote_hint.hide()
+        rv.addWidget(self.remote_hint)
         self.remote_error = label("", "error", wrap=True)
         rv.addWidget(self.remote_error)
         split.addWidget(right)
@@ -255,10 +260,27 @@ class FileManager(QWidget):
         self.roots = reply.get("roots") or []
         for r in self.roots:
             self.root_box.addItem(r["label"], r["id"])
+        # 0.2.0 doesn't say it; its drives are roots named by a single letter
+        self._explain_roots(bool(reply.get("all_drives", any(len(r["id"]) == 1 for r in self.roots))))
         if not self.roots:
             self.remote_error.setText("На удалённом ПК не открыто ни одной папки для файлов.")
             return
         self.open_remote(self.remote_dir or self.roots[0]["id"])
+
+    def _explain_roots(self, all_drives):
+        """Which folders the other PC opened is up to it alone: say where that is changed."""
+        if all_drives:
+            self.remote_hint.hide()
+            return
+        opened = ", ".join(f"«{r['label']}»" for r in self.roots) or "ничего"
+        old = parse_version(self.host_ver or "0") < (0, 2, 0)
+        self.remote_hint.setText(
+            f"{self.host_name} открыл для файлов только {opened} — выше не подняться. Другие папки и диски "
+            f"открывают на нём самом: «Доступ» → «Папки для файлов» → «Все диски этого ПК»"
+            + (f" (там MarinRemote {self.host_ver or 'старой версии'}: сначала обновите его до 0.2.0)." if old
+               else ". Пока к нему подключены с управлением, эти настройки там заблокированы — включите "
+                    "заранее или отключитесь на минуту."))
+        self.remote_hint.show()
 
     def open_remote(self, path):
         if not path:
