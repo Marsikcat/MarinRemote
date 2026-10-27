@@ -9,12 +9,16 @@ A code is what you give someone so they can connect to this PC: compact binary i
 No IP addresses: iroh exchanges them itself through the relay while punching through NAT,
 and on a LAN the broadcast finds the PC anyway. The checksum catches a code that was cut
 short or mistyped before any connection is attempted.
+
+The same code as a link, marinremote://mr-…, opens MarinRemote ready to connect.
 """
 
 import hashlib
 import re
+from urllib.parse import unquote
 
 PREFIX = "mr-"
+SCHEME = "marinremote"
 VERSION = 1
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 N0_RELAY = re.compile(r"^https://([a-z0-9-]+)\.relay\.n0\.iroh\.link\.?/?$")
@@ -61,9 +65,17 @@ def make_code(key_hex, relay=None):
     return PREFIX + b58encode(body + _check(body))
 
 
+def make_link(key_hex, relay=None):
+    return f"{SCHEME}://{make_code(key_hex, relay)}"
+
+
 def parse_code(code):
-    """{"id": key hex, "relay": url | None} — or ValueError with a message for people."""
+    """{"id": key hex, "relay": url | None} from a code or a link — or ValueError with a message
+    for people."""
     code = "".join(str(code).split())
+    if code.lower().startswith(SCHEME + ":"):
+        # browsers hand links over as they like: with a slash at the end, a query, %-escapes
+        code = re.split(r"[?#]", unquote(code[len(SCHEME) + 1:]), maxsplit=1)[0].strip("/")
     if HEX_KEY.match(code.lower()):
         return {"id": code.lower(), "relay": None}
     if code.startswith(FOREIGN):
@@ -87,6 +99,16 @@ def parse_code(code):
     except (ValueError, IndexError, UnicodeDecodeError):
         raise ValueError("код повреждён — скопируйте его целиком") from None
     return {"id": key, "relay": relay_url(label)}
+
+
+def pair_code(initiator, host, n_initiator, n_host):
+    """The six digits both PCs show while they pair (initiator: the one that dialled). Each side
+    adds a fresh random number, the dialler committing to its own before it sees the other's, so
+    nobody in between can line the two codes up by choosing keys or numbers."""
+    h = hashlib.sha256(b"MarinRemote pair v1" + bytes.fromhex(initiator) + bytes.fromhex(host)
+                       + n_initiator + n_host).digest()
+    n = int.from_bytes(h[:8], "big") % 1_000_000
+    return f"{n // 1000:03d} {n % 1000:03d}"
 
 
 CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"      # base32 without I, L, O, U

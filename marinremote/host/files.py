@@ -255,6 +255,10 @@ class FilesService(Service):
             self._drop_put(s, p, keep=False)
             self.core.journal.write("file_put", s.key, name=s.name, path=p.vpath, size=p.size, result="cancelled")
 
+    def rights_changed(self, s, old):
+        if "files" in old and not s.has("files"):
+            self.session_ended(s)          # transfers stop; the parts stay for later
+
     def session_ended(self, s):
         for (sid, _), task in list(self.gets.items()):
             if sid == s.sid:

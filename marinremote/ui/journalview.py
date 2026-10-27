@@ -70,7 +70,10 @@ def details(e):
         out.append(REASONS.get(e["reason"], e["reason"]))
     if e.get("action"):
         out.append({"mkdir": "новая папка", "rename": "переименование", "delete": "в корзину",
-                    "add": "добавлена", "remove": "убрана", "set": "задан", "cleared": "убран"}.get(e["action"], e["action"]))
+                    "add": "добавлена", "remove": "убрана", "set": "задан", "cleared": "убран",
+                    "lock": "заблокировать экран", "restart": "перезагрузить", "shutdown": "выключить",
+                    "cancel": "отменено " + ("на этом ПК" if e.get("by") == "host" else "зрителем")
+                    }.get(e["action"], e["action"]))
     if e.get("path"):
         out.append(str(e["path"]) + (f" → {e['to']}" if e.get("to") else ""))
     if isinstance(e.get("size"), int):
@@ -79,6 +82,8 @@ def details(e):
         out.append(f"продолжено с {human_size(e['offset'])}")
     if e.get("result"):
         out.append(RESULTS.get(e["result"], e["result"]))
+    if e.get("msg"):
+        out.append(str(e["msg"]))
     if e.get("what"):
         out.append(f"что: {e['what']}")
     if e.get("mode"):

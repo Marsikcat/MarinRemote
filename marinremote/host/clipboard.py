@@ -30,6 +30,12 @@ class ClipboardService(Service):
     def session_ended(self, s):
         self.sessions.pop(s.sid, None)
 
+    def rights_changed(self, s, old):
+        if s.has("clipboard"):
+            self.sessions[s.sid] = s
+        else:
+            self.sessions.pop(s.sid, None)
+
     def on_message(self, s, msg):
         if msg["t"] != "clip":
             return False

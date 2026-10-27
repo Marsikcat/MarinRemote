@@ -8,6 +8,7 @@ from pathlib import Path
 from .config import APP_NAME, DISCOVERY_PORT, FROZEN, INSTANCE, PEER_PORT, ROOT
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+LINK_KEY = r"Software\Classes\marinremote"
 RUN_NAME = APP_NAME + (f"-{INSTANCE}" if INSTANCE else "")
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -42,6 +43,45 @@ def set_autostart(enabled):
                 winreg.DeleteValue(k, RUN_NAME)
             except FileNotFoundError:
                 pass
+
+
+def link_command(exe):
+    return f'"{exe}" --connect "%1"'
+
+
+def registered_link_exe():
+    """The program marinremote:// links open now, or None."""
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, LINK_KEY + r"\shell\open\command") as k:
+            command = winreg.QueryValueEx(k, "")[0]
+    except OSError:
+        return None
+    exe = command[1:].split('"', 1)[0] if command.startswith('"') else command.split(" ", 1)[0]
+    return exe or None
+
+
+def register_links():
+    """marinremote:// links open this program. The installer registers them itself; a copy run from
+    elsewhere takes them over only when the registered program is gone. Only the real copy of an
+    installed build does this — never a test copy or `python app.py`."""
+    if not FROZEN or INSTANCE:
+        return
+    current = registered_link_exe()
+    if current and Path(current).exists():
+        return
+    import winreg
+    exe = sys.executable
+    values = {LINK_KEY: [("", "URL:MarinRemote"), ("URL Protocol", "")],
+              LINK_KEY + r"\DefaultIcon": [("", f'"{exe}",0')],
+              LINK_KEY + r"\shell\open\command": [("", link_command(exe))]}
+    try:
+        for sub, pairs in values.items():
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, sub) as k:
+                for name, value in pairs:
+                    winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value)
+    except OSError as e:
+        print(f"links: {e}", flush=True)
 
 
 def open_firewall():

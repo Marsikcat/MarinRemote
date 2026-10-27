@@ -16,6 +16,17 @@ from ..protocol import describe_rights
 from .theme import RED, T
 from .widgets import button, clear_layout, dot, label
 
+
+def control_button(s, set_rights):
+    """«Забрать управление» / «Вернуть управление» for a session let in with control, else None."""
+    if "control" not in s.get("granted", s["rights"]):
+        return None
+    if "control" in s["rights"]:
+        rights = [r for r in s["rights"] if r != "control"]
+        return button("Забрать управление", None, lambda: set_rights(s["sid"], rights),
+                      "Мышь и клавиатура зрителя перестают действовать; смотреть он продолжает")
+    return button("Вернуть управление", None, lambda: set_rights(s["sid"], s["rights"] + ["control"]))
+
 WDA_EXCLUDEFROMCAPTURE = 0x11
 
 
@@ -56,6 +67,7 @@ class SessionPanel(QFrame):
 
     disconnect = Signal(str)        # sid
     disconnect_all = Signal()
+    rights = Signal(str, list)      # sid, the rights it keeps
 
     def __init__(self):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
@@ -87,6 +99,9 @@ class SessionPanel(QFrame):
             btn = button("Отключить", "danger", lambda _=False, sid=s["sid"]: self.disconnect.emit(sid))
             row = QHBoxLayout()
             row.addWidget(text, 1)
+            control = control_button(s, self.rights.emit)
+            if control is not None:
+                row.addWidget(control)
             row.addWidget(btn)
             w = QWidget()
             w.setLayout(row)
@@ -113,11 +128,13 @@ class SessionPanel(QFrame):
 class Indicators:
     """Shows or hides the frame and the panel for the current list of sessions."""
 
-    def __init__(self, on_disconnect, on_disconnect_all):
+    def __init__(self, on_disconnect, on_disconnect_all, on_rights=None):
         self.borders = []
         self.panel = SessionPanel()
         self.panel.disconnect.connect(on_disconnect)
         self.panel.disconnect_all.connect(on_disconnect_all)
+        if on_rights is not None:
+            self.panel.rights.connect(on_rights)
         self.sessions = []
         # something else that wants to be on top (a full-screen game) must not bury them
         self.timer = QTimer(interval=3000, timeout=self._raise)

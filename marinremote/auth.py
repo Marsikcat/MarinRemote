@@ -162,16 +162,18 @@ class ResumeTokens:
 
     def __init__(self, clock=time.monotonic):
         self.clock = clock
-        self.items = {}             # sha256(token) -> {key, rights, sid, until (None: session alive)}
+        self.items = {}             # sha256(token) -> {key, rights, granted, sid, until (None: session alive)}
 
     @staticmethod
     def _h(token):
         return hashlib.sha256(token.encode()).hexdigest()
 
-    def issue(self, key, rights, sid):
+    def issue(self, key, rights, sid, granted=None):
+        """`granted`: what the session was let in with, if the host has taken some of it back."""
         self.revoke_session(sid)
         token = secrets.token_urlsafe(32)
-        self.items[self._h(token)] = {"key": key, "rights": list(rights), "sid": sid, "until": None}
+        self.items[self._h(token)] = {"key": key, "rights": list(rights), "sid": sid, "until": None,
+                                      "granted": list(rights if granted is None else granted)}
         return token
 
     def use(self, key, token):

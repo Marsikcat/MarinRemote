@@ -36,6 +36,7 @@ NEEDS = {
     "clip": "clipboard",
     "fs.roots": "files", "fs.list": "files", "fs.mkdir": "files", "fs.rename": "files",
     "fs.delete": "files", "get": "files", "put": "files", "put.end": "files", "xfer.cancel": "files",
+    "power": "control",
 }
 FREE = {"ping", "bye"}
 
@@ -63,6 +64,7 @@ AUTH_REASONS = {
 }
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def line(obj):
@@ -107,6 +109,7 @@ def check_hello(msg):
     password = msg.get("password")
     resume = msg.get("resume")
     return {
+        "pair": _check_pair(msg.get("pair")),
         "name": clean_text(msg.get("name"), 64) or "Без имени",
         "want": clean_rights(msg.get("want")),
         "password": password if isinstance(password, str) and 0 < len(password) <= 256 else None,
@@ -116,9 +119,20 @@ def check_hello(msg):
     }
 
 
-def make_hello(name, want, version, password=None, resume=None, remember=False):
+def _check_pair(pair):
+    """A request to pair: {commit: sha256 of the dialler's random number, relay, addrs} or None."""
+    if not isinstance(pair, dict) or not isinstance(pair.get("commit"), str) or not HEX64.match(pair["commit"]):
+        return None
+    addrs = pair.get("addrs") if isinstance(pair.get("addrs"), list) else []
+    return {"commit": pair["commit"], "relay": clean_text(pair.get("relay"), 300) or None,
+            "addrs": [a for a in addrs[:8] if isinstance(a, str) and 0 < len(a) <= 64]}
+
+
+def make_hello(name, want, version, password=None, resume=None, remember=False, pair=None):
     msg = {"t": "hello", "app": APP, "proto": PROTO, "ver": version, "name": name,
            "want": clean_rights(want)}
+    if pair:
+        msg["pair"] = pair
     if password:
         msg["password"] = password
     if resume:

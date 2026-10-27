@@ -26,7 +26,8 @@ class HostSession:
         self.fp = fingerprint(self.key)
         self.sid = None
         self.rights = []
-        self.name = ""
+        self.granted = []            # the rights it was let in with: the host may take some back for a
+        self.name = ""               # while and give them back, never more than these
         self.how = ""                # how it got in: approved | contact | password | resume
         self.started = None
         self.end_reason = None       # set when this side ends it: kicked | killed | replaced | idle…
@@ -35,10 +36,12 @@ class HostSession:
         self.queue = asyncio.Queue()
         self.tasks = []
         self._pre_auth_logged = False
+        self.reader = None           # the control stream's lines, from the hello on
 
     def info(self):
         return {"sid": self.sid, "key": self.key, "fp": self.fp, "name": self.name,
-                "rights": list(self.rights), "started": self.started, "how": self.how,
+                "rights": list(self.rights), "granted": list(self.granted), "started": self.started,
+                "how": self.how,
                 **path_info(self.conn)}
 
     def has(self, right):
@@ -50,7 +53,7 @@ class HostSession:
             bi = await asyncio.wait_for(self.conn.accept_bi(), HELLO_TIMEOUT)
             self.send = bi.send()
             await self.send.set_priority(3)
-            reader = LineReader(bi.recv())
+            reader = self.reader = LineReader(bi.recv())
             hello = await self._read_hello(reader)
             if hello is None:
                 return
@@ -104,6 +107,10 @@ class HostSession:
         msg = {"t": "auth", "ok": False, "reason": reason}
         if wait:
             msg["retry_after"] = round(wait)
+        await self.last_word(msg, P.CLOSE_AUTH, reason)
+
+    async def last_word(self, msg, code, reason):
+        """The answer that ends a connection that never became a session."""
         try:
             await self.write(msg)
             await self.send.finish()
@@ -111,7 +118,7 @@ class HostSession:
             await asyncio.wait_for(self.conn.closed(), 3)
         except Exception:
             pass
-        self.close(P.CLOSE_AUTH, reason)
+        self.close(code, reason)
 
     def close(self, code, reason):
         if self.end_reason is None:
@@ -161,7 +168,8 @@ class HostSession:
         if need is None or t == "ping":
             return                       # unknown: a newer viewer — ignored quietly
         if need and need not in self.rights:
-            self.violation(t)
+            if need not in self.granted:        # taken back here a moment ago: the viewer didn't know
+                self.violation(t)
             return
         self.core.on_message(self, msg)
 
@@ -187,7 +195,8 @@ class HostSession:
             if need is None:
                 continue
             if need not in self.rights:
-                self.violation(f"datagram {data[0]}")
+                if need not in self.granted:
+                    self.violation(f"datagram {data[0]}")
                 continue
             self.core.on_datagram(self, data)
 
@@ -213,8 +222,10 @@ class HostSession:
         if need is None:
             await stop_stream(rs)
             return
-        if need not in self.rights:
+        if need not in self.granted:
             self.violation(f"stream {header['t']}")
             await stop_stream(rs)
             return
+        # a right taken back for now keeps its streams open (the input stream lives as long as the
+        # session): the service plays nothing on them and takes no new transfer until it's given back
         await self.core.on_stream(self, header, rest, rs)

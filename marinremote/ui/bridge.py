@@ -46,9 +46,13 @@ class HostBridge(QObject, HostEvents):
     sessions = Signal(list)
     settings = Signal()
     journal = Signal(dict)
+    power = Signal(dict)
 
     def sessions_changed(self, sessions):
         self.sessions.emit(sessions)
+
+    def power_changed(self, info):
+        self.power.emit(info)
 
     def settings_changed(self):
         self.settings.emit()

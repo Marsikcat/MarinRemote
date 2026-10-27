@@ -291,3 +291,32 @@ def test_input_stream_reopens_after_a_reconnect(tmp_path):
         until(lambda: ("key", 0x1E, False, True, 0x41) in inj.log)
     finally:
         close()
+
+
+def test_control_taken_back_and_given_back(tmp_path):
+    s, sender, inj, journal, msgs, core, close = setup(tmp_path, ["view", "control"])
+    try:
+        sender.key(0x2A, 0, True, 0xA0)                    # Shift held when the host takes control back…
+        until(lambda: len(inj.log) == 1)
+        core.set_rights(s.sid, ["view"])
+        until(lambda: s.rights == ["view"])
+        until(lambda: ("key", 0x2A, False, False, 0xA0) in inj.log)     # …is let go
+        n = len(inj.log)
+        sender.move(100, 100)                              # sent before the viewer's window caught up:
+        sender.key(0x1E, 0, True, 0x41)                    # dropped without a word
+        time.sleep(0.6)
+        assert len(inj.log) == n
+        sid = s.sid                                        # a drop keeps what may be given back
+        s.net.call(s._close_conn, s.conn, P.CLOSE_IDLE, "gone")
+        until(lambda: s.state == "connected" and s.sid != sid)
+        assert s.rights == ["view"]
+        core.set_rights(s.sid, ["view", "control", "files"])          # never more than it got in with
+        until(lambda: s.rights == ["view", "control"])
+        sender.key(0x1F, 0, True, 0x53)
+        until(lambda: ("key", 0x1F, False, True, 0x53) in inj.log)
+        events = journal.read()
+        assert not [e for e in events if e["event"] == "violation"]
+        assert [e["rights"] for e in events if e["event"] == "rights"] == [["view"], ["view", "control"]]
+        assert any(m["t"] == "rights" for m in msgs.msgs)
+    finally:
+        close()

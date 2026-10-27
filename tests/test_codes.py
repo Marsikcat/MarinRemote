@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from marinremote.codes import fingerprint, make_code, parse_code, pretty
+from marinremote.codes import fingerprint, make_code, make_link, parse_code, pretty
 
 KEY = "ab" * 32
 RELAY = "https://euw1-1.relay.n0.iroh.link./"
@@ -68,3 +68,37 @@ def test_fingerprint_is_short_stable_and_readable():
     assert re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}", fp)
     assert fp == fingerprint(KEY)
     assert fp != fingerprint("cd" * 32)
+
+
+def test_links_as_browsers_hand_them_over():
+    code = make_code(KEY, "https://euc1-1.relay.n0.iroh.link./")
+    link = make_link(KEY, "https://euc1-1.relay.n0.iroh.link./")
+    assert link == "marinremote://" + code
+    want = {"id": KEY, "relay": "https://euc1-1.relay.n0.iroh.link./"}
+    for text in (link, link + "/", link + "/?from=chat", link + "#x", "MarinRemote://" + code,
+                 "marinremote:" + code, "marinremote://" + code.replace("-", "%2D"), f" {link}\n"):
+        assert parse_code(text) == want, text
+    with pytest.raises(ValueError):
+        parse_code("marinremote://")
+    with pytest.raises(ValueError):
+        parse_code("marinremote://marin-abc")
+
+
+def test_connect_argument_and_the_registered_command():
+    import app
+    from marinremote.system import link_command
+    assert app.link_arg(["--connect", "mr-abc"]) == "mr-abc"
+    assert app.link_arg(["--autostart"]) is None
+    assert app.link_arg(["--connect"]) is None
+    assert app.link_arg(["marinremote://mr-abc/"]) == "marinremote://mr-abc/"
+    exe = r"C:\Program Files\MR\MarinRemote.exe"
+    assert link_command(exe) == f'"{exe}" --connect "%1"'
+
+
+def test_pair_code_takes_every_part():
+    from marinremote.codes import pair_code
+    a, b, na, nb = "aa" * 32, "bb" * 32, b"\1" * 32, b"\2" * 32
+    code = pair_code(a, b, na, nb)
+    assert re.match(r"^\d{3} \d{3}$", code) and code == pair_code(a, b, na, nb)
+    others = {pair_code(b, a, na, nb), pair_code(a, b, nb, na), pair_code(a, b, na, b"\3" * 32)}
+    assert code not in others

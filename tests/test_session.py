@@ -60,7 +60,11 @@ class Recorder(Service):
 class States(ViewerEvents):
     def __init__(self):
         self.seen = []
+        self.msgs = []
         self.cv = threading.Condition()
+
+    def message(self, session, msg):
+        self.msgs.append(msg)
 
     def state_changed(self, session):
         with self.cv:
@@ -341,3 +345,89 @@ def test_disconnect_one_session(pair):
     pair.core.disconnect(s.sid)
     assert s.events_rec.wait(s, "closed")["reason"] == "kicked"
     assert pair.events("session_end")[-1]["reason"] == "kicked"
+
+
+def test_power_needs_control_and_can_be_called_off(pair):
+    from marinremote.host.power import DELAY, PowerService
+    ran, told = [], []
+
+    def run(action, comment):
+        if action == "shutdown" and len(ran) > 4:
+            raise OSError("Отказано в доступе.")
+        ran.append((action, comment))
+    pair.core.events.power_changed = told.append
+    pair.core.services.insert(0, PowerService(pair.core, run=run))
+    pair.approver.answer = approve(["view"])
+    s = pair.connect()
+    s.events_rec.wait(s, "connected")
+    s.post({"t": "power", "action": "shutdown"})          # watching only: not a word reaches Windows
+    until(lambda: any(e.get("what") == "power" for e in pair.events("violation")))
+    assert ran == []
+    s.stop()
+
+    pair.approver.answer = approve(["view", "control"])
+    s = pair.connect()
+    s.events_rec.wait(s, "connected")
+    msgs = s.events_rec.msgs
+    s.post({"t": "power", "action": "restart"})
+    until(lambda: {"t": "power.ok", "action": "restart", "delay": DELAY} in msgs)
+    assert ran == [("restart", "MarinRemote: ноутбук")]
+    assert told[-1]["state"] == "scheduled" and told[-1]["action"] == "restart"
+    s.post({"t": "power", "action": "shutdown"})          # one at a time
+    until(lambda: any(m["t"] == "power.error" for m in msgs))
+    s.post({"t": "power", "action": "cancel"})
+    until(lambda: {"t": "power.cancelled", "action": "restart", "by": "viewer"} in msgs)
+    assert ran[-1] == ("cancel", "")
+    s.post({"t": "power", "action": "shutdown"})
+    until(lambda: ran[-1][0] == "shutdown")
+    pair.core.cancel_power()                              # the person at the host says no
+    until(lambda: {"t": "power.cancelled", "action": "shutdown", "by": "host"} in msgs)
+    assert told[-1] == {"action": "shutdown", "state": "cancelled", "name": "ноутбук", "by": "host"}
+    s.post({"t": "power", "action": "lock"})
+    until(lambda: {"t": "power.ok", "action": "lock", "delay": 0} in msgs)
+    s.post({"t": "power", "action": "shutdown"})          # Windows says no: the viewer hears why
+    until(lambda: {"t": "power.error", "action": "shutdown", "msg": "Отказано в доступе."} in msgs)
+    assert [(e["action"], e["result"]) for e in pair.events("power")] == [
+        ("restart", "ok"), ("cancel", "ok"), ("shutdown", "ok"), ("cancel", "ok"), ("lock", "ok"),
+        ("shutdown", "error")]
+
+
+def test_pairing_shows_one_code_on_both_and_the_host_remembers(pair):
+    import re
+    from marinremote.viewer.pair import request_pair
+    codes = []
+    pair.approver.answer = {"allow": True, "rights": ["view", "control"], "remember": None, "block": False}
+    result = pair.viewer.net.submit(request_pair(pair.viewer, pair.target, "ноутбук", codes.append)).result(20)
+    assert result["ok"] and result["rights"] == ["view", "control"]
+    asked = pair.approver.asked[-1]
+    assert re.match(r"^\d{3} \d{3}$", codes[0]) and asked["pair"] == codes[0] == result["code"]
+    assert asked["timeout"] == HostCore.PAIR_TIMEOUT and asked["want"] == list(P.RIGHTS)
+    key = pair.viewer.id
+    assert pair.hs["trusted"][key]["mode"] == "contact" and pair.hs["trusted"][key]["rights"] == ["view", "control"]
+    contact = pair.hs["contacts"][key]
+    assert contact["name"] == "ноутбук" and contact["paired"]
+    assert [e["rights"] for e in pair.events("paired")] == [["view", "control"]]
+    assert not pair.core.sessions                      # pairing is not a session
+    s = pair.connect(want=["view", "control"])         # and from now on: straight in
+    s.events_rec.wait(s, "connected")
+    assert len(pair.approver.asked) == 1
+
+
+def test_pairing_refused_leaves_nothing_behind(pair):
+    from marinremote.viewer.pair import request_pair
+    pair.approver.answer = {"allow": False}
+    result = pair.viewer.net.submit(request_pair(pair.viewer, pair.target, "ноутбук")).result(20)
+    assert result == {"ok": False, "reason": "denied", "retry_after": None}
+    assert not (pair.hs["trusted"] or {}) and not (pair.hs["contacts"] or {})
+
+
+def test_pairing_with_a_number_other_than_the_promised_one_is_cut_short(pair, monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+    from marinremote.viewer import pair as viewer_pair
+    # the dialler commits to one number and reveals another (what someone in between would need)
+    monkeypatch.setattr(viewer_pair, "hashlib", SimpleNamespace(sha256=lambda b: hashlib.sha256(b"x" + b)))
+    pair.approver.answer = {"allow": True, "rights": ["view"], "remember": None, "block": False}
+    result = pair.viewer.net.submit(viewer_pair.request_pair(pair.viewer, pair.target, "ноутбук")).result(20)
+    assert result["ok"] is False and result["reason"] == "protocol"
+    assert pair.approver.asked == []

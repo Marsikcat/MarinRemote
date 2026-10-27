@@ -2,6 +2,9 @@
 «… хочет подключиться» — the window that lets someone in. Nothing is pre-approved: the person
 at this PC sees who it is (the name it gives itself and the fingerprint of its key), picks the
 rights, may remember the device, and has 30 seconds; no answer is a «no».
+
+The same window asks about pairing («… хочет связаться»): then it shows the code to compare with
+the other PC, and «Связать» remembers that PC for good.
 """
 
 import math
@@ -14,7 +17,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QHBo
 from ..auth import MODES
 from ..protocol import RIGHT_NAMES, RIGHTS
 from . import icons
-from .theme import style_window
+from .theme import mono_font, style_window
 from .widgets import button, label, note
 
 
@@ -29,7 +32,8 @@ class ApproveDialog(QDialog):
         self.done_ = False
         self.deadline = time.monotonic() + request.get("timeout", 30)
         self.setAttribute(Qt.WA_DeleteOnClose)
-        self.setWindowTitle("MarinRemote — запрос на подключение")
+        self.pair = request.get("pair")
+        self.setWindowTitle("MarinRemote — " + ("связать ПК" if self.pair else "запрос на подключение"))
         self.setWindowIcon(icons.app_icon(True))
         self.setMinimumWidth(540)
 
@@ -37,7 +41,8 @@ class ApproveDialog(QDialog):
         lay.setContentsMargins(22, 20, 22, 18)
         lay.setSpacing(10)
         record = request.get("record") or {}
-        title = label(f"«{request['name']}» хочет подключиться к этому компьютеру", "h2", wrap=True)
+        title = label(f"«{request['name']}» хочет " + ("связаться с этим компьютером" if self.pair else
+                                                         "подключиться к этому компьютеру"), "h2", wrap=True)
         lay.addWidget(title)
         who = [f"Устройство <b>{request['fp']}</b>"]
         if record:
@@ -49,6 +54,18 @@ class ApproveDialog(QDialog):
         info = label(" · ".join(who), "muted", wrap=True)
         info.setTextFormat(Qt.RichText)
         lay.addWidget(info)
+        if self.pair:
+            code = label(self.pair)
+            code.setFont(mono_font(26))
+            code.setStyleSheet("font-size: 26pt; font-weight: 700;")
+            code.setAlignment(Qt.AlignCenter)
+            code.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            lay.addWidget(code)
+            lay.addWidget(note(f"Сверьте код: на «{request['name']}» должен быть такой же. Если не совпадает — "
+                               f"нажмите «Отклонить»: значит, в сети кто-то выдаёт себя за тот ПК."))
+            lay.addWidget(label("Оба ПК запомнят друг друга: тот сможет подключаться сюда без подтверждения "
+                                "с правами, отмеченными ниже, а этот — к нему в один клик из контактов. "
+                                "Связывайте только свои компьютеры.", "hint", wrap=True))
         if request.get("password_given"):
             lay.addWidget(note("Указан пароль, но этому устройству вход по паролю не разрешён — "
                                "поэтому спрашиваем вас."))
@@ -67,6 +84,13 @@ class ApproveDialog(QDialog):
             lay.addWidget(cb)
         self.boxes["view"].toggled.connect(self._view_toggled)
 
+        self.unattended = None
+        if self.pair and not request.get("unattended", True):
+            self.unattended = QCheckBox("Пускать запомненные устройства без подтверждения (сейчас выключено)")
+            self.unattended.setToolTip("То же, что переключатель на странице «Доступ». Без него связанный ПК "
+                                       "будет каждый раз спрашивать разрешения.")
+            lay.addWidget(self.unattended)
+
         lay.addSpacing(4)
         self.remember = QCheckBox("Запомнить это устройство:")
         self.mode = QComboBox()
@@ -78,8 +102,12 @@ class ApproveDialog(QDialog):
         row = QHBoxLayout()
         row.addWidget(self.remember)
         row.addWidget(self.mode, 1)
-        lay.addLayout(row)
-        if request.get("remember"):
+        if not self.pair:                        # pairing remembers it anyway
+            lay.addLayout(row)
+        else:
+            self.remember.hide()
+            self.mode.hide()
+        if request.get("remember") and not self.pair:
             lay.addWidget(label("Устройство просит запомнить его, чтобы подключаться без подтверждения.",
                                 "hint", wrap=True))
 
@@ -92,7 +120,7 @@ class ApproveDialog(QDialog):
         buttons.addWidget(block)
         buttons.addStretch(1)
         deny = button("Отклонить", "secondary", self._deny)
-        allow = button("Разрешить", "success", self._allow)
+        allow = button("Связать" if self.pair else "Разрешить", "success", self._allow)
         deny.setAutoDefault(False)
         allow.setAutoDefault(False)              # Enter must not let anyone in by accident
         buttons.addWidget(deny)
@@ -122,7 +150,8 @@ class ApproveDialog(QDialog):
             self.countdown.setText("Время вышло — отказано.")
             self.timer.stop()
             return
-        self.countdown.setText(f"Если не ответить, через {math.ceil(left)} с подключение будет отклонено.")
+        self.countdown.setText(f"Если не ответить, через {math.ceil(left)} с "
+                               + ("связывание будет отменено." if self.pair else "подключение будет отклонено."))
 
     def _finish(self, decision):
         if self.done_:
@@ -138,7 +167,8 @@ class ApproveDialog(QDialog):
             self.countdown.setText("Отметьте хотя бы одно право — или нажмите «Отклонить».")
             return
         self._finish({"allow": True, "rights": rights, "block": False,
-                      "remember": self.mode.currentData() if self.remember.isChecked() else None})
+                      "remember": self.mode.currentData() if self.remember.isChecked() and not self.pair else None,
+                      "unattended": self.unattended is not None and self.unattended.isChecked()})
 
     def _deny(self):
         self._finish({"allow": False})

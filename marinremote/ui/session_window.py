@@ -16,12 +16,13 @@ import ctypes
 import os
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QInputDialog, QStackedWidget,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QInputDialog, QMenu, QMessageBox,
+                               QStackedWidget, QVBoxLayout, QWidget)
 
 from ..codes import fingerprint
 from ..host.clipboard import MAX_TEXT as MAX_CLIP
 from ..host.capture import QUALITY
+from ..host.power import DELAY as POWER_DELAY
 from ..protocol import AUTH_REASONS, describe_rights, wait_text
 from ..viewer.decoder import Decoder
 from ..viewer.files import FileClient, join
@@ -46,6 +47,17 @@ STATE_TEXT = {
     "closed": "Отключено",
 }
 STATE_COLOR = {"connected": GREEN, "closed": RED}
+POWER_ASK = {
+    "lock": ("Заблокировать экран", "Заблокировать экран «{name}»?\n\nРазблокировать его отсюда в этой версии "
+             "нельзя: экран блокировки защищён, войти сможет только человек у того ПК. Картинка и управление "
+             "вернутся после входа."),
+    "restart": ("Перезагрузить", f"Перезагрузить «{{name}}»?\n\nЧерез {POWER_DELAY} с ПК перезагрузится; "
+                f"несохранённое в его программах может пропасть. Сеанс оборвётся — подключиться снова можно, "
+                f"когда ПК загрузится и MarinRemote на нём запустится."),
+    "shutdown": ("Выключить", f"Выключить «{{name}}»?\n\nЧерез {POWER_DELAY} с ПК выключится; несохранённое "
+                 f"в его программах может пропасть. Включить его обратно отсюда не получится."),
+}
+POWER_DONE = {"restart": "перезагрузится", "shutdown": "выключится"}
 VIDEO_REASONS = {
     "secure_desktop": "На удалённом ПК сейчас защищённый экран (запрос UAC, блокировка или экран входа).\n"
                       "Его нельзя показать в этой версии — картинка вернётся сама.",
@@ -73,6 +85,8 @@ class SessionWindow(QWidget):
         self.key = target["id"]
         self.want = list(want)
         self.video_state = {}
+        self._had_control = False        # to tell the viewer when the host takes control back or returns it
+        self._last_state = None
         self.clock_samples = deque(maxlen=8)
         self._stats_mark = (time.monotonic(), 0, 0, 0)
         self.setAttribute(Qt.WA_DeleteOnClose)
@@ -114,6 +128,16 @@ class SessionWindow(QWidget):
                                                            "Уходит только то, что скопировано во время сеанса.")
         self.clip_btn.setCheckable(True)
         self.clip_btn.setChecked(True)
+        self.power_btn = button("Действия", "small", tip="Заблокировать, перезагрузить или выключить удалённый ПК")
+        self.power_menu = QMenu(self)
+        for action, (text, _) in POWER_ASK.items():
+            self.power_menu.addAction(text + ("…" if action != "lock" else ""),
+                                      lambda a=action: self._power(a))
+        self.power_menu.addSeparator()
+        self.power_cancel = self.power_menu.addAction("Отменить перезагрузку или выключение",
+                                                      lambda: self.session.post({"t": "power", "action": "cancel"}))
+        self.power_cancel.setEnabled(False)
+        self.power_btn.setMenu(self.power_menu)
         self.files_btn = button("Файлы", "small", self._open_files,
                                 tip="Файлы этого и удалённого ПК; файлы можно и просто перетащить на картинку")
         self.stats_btn = button("Статистика", "small", self._toggle_stats)
@@ -124,7 +148,7 @@ class SessionWindow(QWidget):
         self.retry_btn = button("Подключиться снова", "small", self._retry)
         self.leave_btn = button("Отключить", "danger", self.close)
         for w in (self.monitor_box, self.quality_box, self.control_btn, self.keys_btn, self.clip_btn,
-                  self.files_btn, self.stats_btn, self.full_btn, self.save_btn, self.retry_btn, self.leave_btn):
+                  self.files_btn, self.power_btn, self.stats_btn, self.full_btn, self.save_btn, self.retry_btn, self.leave_btn):
             w.setFocusPolicy(Qt.NoFocus)        # keys stay with the picture (and the remote PC)
             b.addWidget(w)
         lay.addWidget(self.bar)
@@ -208,6 +232,9 @@ class SessionWindow(QWidget):
         if session is not self.session:
             return
         st = session.state
+        if st != self._last_state:
+            self._last_state = st
+            self._had_control = "control" in session.rights
         self.title.setText(self._name())
         self.setWindowTitle(f"{self._name()} — MarinRemote")
         self.dot.setStyleSheet(f"background: {STATE_COLOR.get(st, YELLOW)}; border-radius: 5px;")
@@ -220,6 +247,7 @@ class SessionWindow(QWidget):
         for w in (self.control_btn, self.keys_btn):
             w.setVisible(watching and "control" in session.rights)
         self.files_btn.setVisible(st in ("connected", "reconnecting") and "files" in session.rights)
+        self.power_btn.setVisible(st == "connected" and "control" in session.rights)
         self.clip_btn.setVisible(st in ("connected", "reconnecting") and "clipboard" in session.rights)
         self.monitor_box.setVisible(watching and self.monitor_box.count() > 1)
         if st != "connected":
@@ -302,6 +330,30 @@ class SessionWindow(QWidget):
                 QTimer.singleShot(4000, self._hide_self_warning)
         elif t == "clock":
             self._got_clock(msg)
+        elif t == "rights":
+            had, has = self._had_control, "control" in session.rights
+            if had and not has:
+                self._note("Тот ПК забрал управление: вы смотрите, мышь и клавиатура туда не идут.")
+            elif has and not had:
+                self._note("Тот ПК вернул управление.")
+            else:
+                self._note(f"Тот ПК изменил права: {describe_rights(session.rights)}.")
+        elif t == "power.ok":
+            action = msg.get("action")
+            if action == "lock":
+                self._note(f"Экран «{self._name()}» заблокирован.")
+            elif action in POWER_DONE:
+                self.power_cancel.setEnabled(True)
+                QTimer.singleShot((POWER_DELAY + 10) * 1000, self, lambda: self.power_cancel.setEnabled(False))
+                self._note(f"«{self._name()}» {POWER_DONE[action]} через {msg.get('delay', POWER_DELAY)} с. "
+                           f"Передумали — «Действия» → «Отменить».")
+        elif t == "power.error":
+            self._note(f"Не получилось: {msg.get('msg') or 'ошибка на том ПК'}.")
+        elif t == "power.cancelled":
+            self.power_cancel.setEnabled(False)
+            what = {"restart": "Перезагрузка", "shutdown": "Выключение"}.get(msg.get("action"), "Действие")
+            self._note(f"{what} отменено" + (" на том ПК." if msg.get("by") == "host" else "."))
+        self._had_control = "control" in session.rights
 
     # ── the picture ─────────────────────────────────────────────────
     def _monitor_chosen(self, index):
@@ -423,6 +475,17 @@ class SessionWindow(QWidget):
         self.warn.text.setText(text)
         self.warn.show()
         QTimer.singleShot(5000, lambda: self.warn.text.text() == text and self.warn.hide())
+
+    def _power(self, action):
+        title, text = POWER_ASK[action]
+        box = QMessageBox(QMessageBox.Warning, title, text.format(name=self._name()),
+                          QMessageBox.Cancel, self)
+        ok = box.addButton(title, QMessageBox.AcceptRole)
+        box.setDefaultButton(QMessageBox.Cancel)
+        box.exec()
+        s = self.session
+        if box.clickedButton() is ok and s is not None and s.state == "connected" and "control" in s.rights:
+            s.post({"t": "power", "action": action})
 
     def _hide_self_warning(self):
         if self.warn.text.text() == WARNINGS["self"]:

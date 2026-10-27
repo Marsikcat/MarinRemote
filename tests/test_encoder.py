@@ -98,3 +98,26 @@ def test_repeats_are_told_apart_by_their_texture():
     assert r(frame("d3d11", 200))
     assert not r(frame("d3d11", 100))
     assert not r(frame("bgra", 5)) and not r(frame("bgra", 5))   # system memory: never taken for repeats
+
+
+@pytest.mark.skipif(not os.environ.get("MARINREMOTE_REAL_SCREEN"),
+                    reason="captures the real screen: set MARINREMOTE_REAL_SCREEN=1")
+def test_real_monitor_through_wgc_when_ddagrab_is_out():
+    from marinremote.winapi import monitors
+    m = monitors()[-1]
+    source = {"kind": "monitor", **{k: m[k] for k in ("x", "y", "w", "h")}, "dxgi": None}
+    frames, asked, info = run_encoder("nvenc" if has_nvenc() else "x264", source=source,
+                                      params={"fps": 30, "kbps": 8000, "h": None})
+    assert info["capture"] == "wgc" and (info["w"], info["h"]) == (m["w"], m["h"])
+    check_stream(frames, asked)
+
+
+def test_a_frame_handed_out_again_is_a_repeat():
+    from types import SimpleNamespace
+
+    from marinremote.host.encoder import Repeats
+    r = Repeats()
+    same = SimpleNamespace(format=SimpleNamespace(name="bgra"), planes=[SimpleNamespace(buffer_ptr=1)])
+    assert not r(same)
+    assert r(same) and r(same)                                  # the very same object: nothing new
+    assert not r(SimpleNamespace(format=SimpleNamespace(name="bgra"), planes=[SimpleNamespace(buffer_ptr=1)]))

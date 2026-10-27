@@ -1,6 +1,8 @@
 """
 The viewer's mouse and keyboard, on the host's side (the session has already checked the
-"control" right for every stream and datagram that gets here).
+"control" right for every datagram that gets here; an input stream may outlive the right for a
+while — the host can take control back and give it back — so only a session with control now
+has a state here, and only its events are played).
 
 Also watches what injected input can't reach and tells viewers with control about it: a window
 of an administrator in front (Windows' UIPI drops our input to it without a word) or a secure
@@ -46,6 +48,12 @@ class InputService(Service):
         if self._guard is None:
             self._guard = self.net.spawn(self._guard_loop())
 
+    def rights_changed(self, s, old):
+        if s.has("control") and s.sid not in self.states:
+            self.session_started(s)
+        elif not s.has("control") and s.sid in self.states:
+            self.session_ended(s)          # lets go of whatever this viewer held
+
     def session_ended(self, s):
         st = self.states.pop(s.sid, None)
         self.sessions.pop(s.sid, None)
@@ -77,7 +85,7 @@ class InputService(Service):
                 break
             st = self.states.get(s.sid)
             if st is None:
-                break
+                continue                  # control taken back for now: read on, play nothing
             try:
                 st.event(json.loads(raw))
             except ValueError:

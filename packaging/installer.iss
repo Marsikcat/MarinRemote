@@ -60,6 +60,11 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 ; the same value the app writes from «Этот ПК → Запускать вместе с Windows»
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#AppName}"; ValueData: """{app}\{#AppExe}"" --autostart"; Tasks: autostart
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "{#AppName}"; Flags: uninsdeletevalue
+; marinremote://mr-… links open the app ready to connect (it asks first)
+Root: HKCU; Subkey: "Software\Classes\marinremote"; ValueType: string; ValueName: ""; ValueData: "URL:MarinRemote"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\marinremote"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\marinremote\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"",0"
+Root: HKCU; Subkey: "Software\Classes\marinremote\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --connect ""%1"""
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent

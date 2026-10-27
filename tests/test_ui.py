@@ -73,7 +73,8 @@ def test_main_window_and_the_question_round_trip(app, window):
     dlg.boxes["control"].setChecked(False)
     dlg.remember.setChecked(True)
     dlg._allow()
-    assert answer.result(5) == {"allow": True, "rights": ["view"], "block": False, "remember": "contact"}
+    assert answer.result(5) == {"allow": True, "rights": ["view"], "block": False, "remember": "contact",
+                                "unattended": False}
 
     # withdrawn questions close their window unanswered
     second = node.net.submit(approver.ask(dict(REQUEST, id=8)))
@@ -130,3 +131,66 @@ def test_a_test_copys_autostart_names_its_instance(monkeypatch):
     assert system._launch_command().endswith("--autostart")
     monkeypatch.setattr(system, "INSTANCE", 2)
     assert system._launch_command().endswith("--autostart --instance 2")
+
+
+def test_take_control_back_button(app):
+    from marinremote.ui.overlay import SessionPanel, control_button
+    calls = []
+    s = {"sid": "a1", "name": "ноут", "fp": "ABCD-EFGH", "rights": ["view", "control", "files"],
+         "granted": ["view", "control", "files"], "started": time.time()}
+    b = control_button(s, lambda sid, rights: calls.append((sid, rights)))
+    assert b.text() == "Забрать управление"
+    b.click()
+    assert calls[-1] == ("a1", ["view", "files"])
+    s["rights"] = ["view", "files"]
+    b = control_button(s, lambda sid, rights: calls.append((sid, rights)))
+    assert b.text() == "Вернуть управление"
+    b.click()
+    assert calls[-1] == ("a1", ["view", "files", "control"])
+    assert control_button({**s, "granted": ["view", "files"]}, None) is None    # never had it
+    panel = SessionPanel()
+    panel.rights.connect(lambda sid, rights: calls.append((sid, rights)))
+    panel.set_sessions([s])
+    [btn] = [w for w in panel.findChildren(type(b)) if w.text() == "Вернуть управление"]
+    btn.click()
+    assert calls[-1] == ("a1", ["view", "files", "control"])
+    panel.close()
+
+
+def test_pairing_from_both_windows(app, window, tmp_path, autostart):
+    """«Связать» on one PC, the code in both windows, «Связать» on both: each keeps the other."""
+    from marinremote.ui.bridge import HostBridge, QtApprover
+    from marinremote.ui.mainwindow import MainWindow
+    from marinremote.ui.pair import PairDialog
+    win_b, node_b, approver_b, _ = window
+    s = Settings(tmp_path / "a")
+    s.set("name", "ноутбук")
+    node_a = Node(s.secret_key, port=0, mode="lan", bind_host="127.0.0.1", lan=False)
+    node_a.start()
+    bridge = HostBridge()
+    approver = QtApprover(node_a.net)
+    core_a = HostCore(s, node_a, Journal(tmp_path / "a" / "journal.jsonl"), approver, events=bridge)
+    win_a = MainWindow(s, node_a, core_a, core_a.journal, approver, bridge)
+    try:
+        dlg = PairDialog(win_a, s, node_a, core_a, {"id": node_b.id, "relay": None, "name": "стол",
+                                                     "addrs": [f"127.0.0.1:{node_b.port}"]})
+        dlg.show()
+        pump(app, lambda: win_b.dialogs and dlg.ok_btn.isEnabled())
+        [there] = win_b.dialogs.values()
+        assert there.pair == dlg.code.text() and "связаться" in there.windowTitle() + there.findChildren(
+            type(dlg.code))[0].text()
+        dlg.boxes["files"].setChecked(False)
+        dlg._confirm()                                   # the codes match, here…
+        there.boxes["clipboard"].setChecked(False)
+        there._allow()                                   # …and there
+        pump(app, lambda: "Готово" in dlg.status.text(), timeout=10)
+        b = win_b.s
+        assert b["trusted"][node_a.id]["rights"] == ["view", "control", "files"]
+        assert b["contacts"][node_a.id]["name"] == "ноутбук"
+        assert s["trusted"][node_b.id] == {**s["trusted"][node_b.id], "mode": "contact",
+                                           "rights": ["view", "control", "clipboard"]}
+        assert s["contacts"][node_b.id]["paired"]
+        dlg.close()
+    finally:
+        win_a.shutdown()
+        node_a.stop()

@@ -5,6 +5,7 @@ with no servers of its own: QUIC through iroh, dialled by the PC's public key.
 
     python app.py              open the app (this PC can be connected to; it can connect out)
     python app.py --autostart  launched by Windows at logon (starts in the tray)
+    python app.py --connect <code or marinremote:// link>   connect to that PC (asks first)
     python app.py --encoder <json>   the screen encoder (started by the app itself)
 
 MARINREMOTE_INSTANCE=1 (2, …) runs a test copy with its own ports and a data folder in %TEMP%.
@@ -30,6 +31,13 @@ REQUIRED = ("PySide6", "av", "numpy", "iroh", "nacl")
 def _missing():
     import importlib.util
     return [m for m in REQUIRED if importlib.util.find_spec(m) is None]
+
+
+def link_arg(args):
+    """The code of `--connect <code>`, or a marinremote:// link passed as it is, or None."""
+    if "--connect" in args[:-1]:
+        return args[args.index("--connect") + 1]
+    return next((a for a in args if a.lower().startswith("marinremote:")), None)
 
 
 def _message(text, icon=0x10):
@@ -67,7 +75,7 @@ def main():
     from marinremote.config import APP_NAME, DATA, INSTANCE, Settings
     _setup_logging(DATA)
 
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import Qt, QTimer
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     from PySide6.QtWidgets import QApplication
@@ -78,13 +86,16 @@ def main():
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
 
-    # one copy per Windows user (and test instance): a second launch brings the window up
+    # one copy per Windows user (and test instance): a second launch brings the window up — or
+    # hands over the link it was opened with
+    link = link_arg(args)
     key = f"{APP_NAME}-{os.environ.get('USERNAME', 'user')}-{INSTANCE}"
     sock = QLocalSocket()
     sock.connectToServer(key)
     if sock.waitForConnected(300):
-        sock.write(b"show")
+        sock.write(b"connect " + link.encode() if link else b"show")
         sock.waitForBytesWritten(1000)
+        sock.disconnectFromServer()
         return 0
     QLocalServer.removeServer(key)
     server = QLocalServer()
@@ -106,9 +117,11 @@ def main():
     from marinremote.host.core import HostCore
     from marinremote.host.files import FilesService
     from marinremote.host.input import InputService
+    from marinremote.host.power import PowerService
     from marinremote.host.video import VideoService
     from marinremote.journal import Journal
     from marinremote.net import Node
+    from marinremote.system import register_links
     from marinremote.ui import theme
     from marinremote.ui.bridge import HostBridge, QtApprover
     from marinremote.ui.clipboard import QtClipboard
@@ -126,14 +139,29 @@ def main():
     bridge = HostBridge()
     core = HostCore(settings, node, journal, approver, events=bridge)
     video = VideoService(core)
-    core.services += [video, InputService(core, video), FilesService(core), ClipboardService(core, QtClipboard())]
+    core.services += [video, InputService(core, video), FilesService(core), ClipboardService(core, QtClipboard()),
+                      PowerService(core)]
     win = MainWindow(settings, node, core, journal, approver, bridge)
 
     def on_second_instance():
         conn = server.nextPendingConnection()
-        if conn:
-            conn.readyRead.connect(win.show_window)
-            conn.disconnected.connect(conn.deleteLater)
+        if not conn:
+            return
+        got = bytearray()
+
+        def read():
+            got.extend(bytes(conn.readAll()))
+
+        def done():
+            read()
+            text = got[:4096].decode("utf-8", "replace")
+            if text.startswith("connect "):
+                win.open_link(text[8:])
+            else:
+                win.show_window()
+            conn.deleteLater()
+        conn.readyRead.connect(read)
+        conn.disconnected.connect(done)
     server.newConnection.connect(on_second_instance)
 
     def on_quit():
@@ -142,8 +170,11 @@ def main():
         node.stop()
     app.aboutToQuit.connect(on_quit)
 
+    register_links()
     if "--autostart" not in args or not settings["start_minimized"]:
         win.show()
+    if link:
+        QTimer.singleShot(0, lambda: win.open_link(link))
     print(f"ready: {node.id} port {node.port} data {settings.folder}", flush=True)
     return app.exec()
 

@@ -3,9 +3,10 @@ The screen encoder, in a process of its own: `MarinRemote.exe --encoder <json>`
 (from source: `python app.py --encoder <json>`).
 
 FFmpeg's libraries do the work through PyAV, no ffmpeg.exe. DXGI desktop duplication
-(ddagrab) hands D3D11 frames straight to NVENC on the GPU. x264, scaled pictures and monitors
-ddagrab can't reach (another video adapter) go through system memory (gdigrab). The cursor is
-not drawn into the picture: the viewer draws it.
+(ddagrab) hands D3D11 frames straight to NVENC on the GPU; x264 and scaled pictures go through
+system memory. A monitor ddagrab can't hold (one on another video adapter: Windows keeps taking
+the duplication back) is captured with Windows.Graphics.Capture (wgc.py), and only if that is
+missing too, with GDI. The cursor is not drawn into the picture: the viewer draws it.
 
 Out, on a loopback TCP socket to the app — our own frames, one encoded picture each:
     [u32 length][u64 capture time, µs, QueryPerformanceCounter][u8 flags: 1 = keyframe][H.264 Annex-B]
@@ -84,10 +85,47 @@ class Repeats:
         self.prev_tex = None
 
     def __call__(self, frame):
+        if frame is self.prev:                       # handed out again as it is (WGC: nothing new)
+            return True
         tex = frame.planes[0].buffer_ptr if frame.format.name == "d3d11" and frame.planes else None
         repeat = tex is not None and tex == self.prev_tex
         self.prev, self.prev_tex = frame, tex
         return repeat
+
+
+class _WgcInput:
+    """A monitor through Windows.Graphics.Capture, shaped like a PyAV input for the loop below:
+    decode() yields BGRA frames at the frame rate — the very same frame object again while
+    nothing changes, which the loop takes for a repeat."""
+
+    def __init__(self, src, fps, stopping):
+        from . import wgc
+        self.fps, self.stopping = fps, stopping
+        self.cap = wgc.MonitorCapture(wgc.monitor_at(src["x"] + src["w"] // 2, src["y"] + src["h"] // 2))
+        deadline = time.perf_counter() + 5
+        self.first = self.cap.grab()
+        while self.first is None:                     # the first picture takes a moment
+            if time.perf_counter() > deadline:
+                self.cap.close()
+                raise OSError("монитор не отдаёт изображение")
+            time.sleep(0.01)
+            self.first = self.cap.grab()
+
+    def decode(self, video=0):
+        import av
+        last = av.VideoFrame.from_ndarray(self.first, format="bgra")
+        self.first = None
+        t0, n = time.perf_counter(), 0
+        try:
+            while not self.stopping.is_set():
+                yield last
+                n += 1
+                time.sleep(max(0.0, t0 + n / self.fps - time.perf_counter()))
+                img = self.cap.grab()
+                if img is not None:
+                    last = av.VideoFrame.from_ndarray(img, format="bgra")
+        finally:
+            self.cap.close()
 
 
 class Worker:
@@ -138,7 +176,14 @@ class Worker:
                 except av.error.FFmpegError as e:
                     error = e
                     time.sleep(0.4)
-            _say(f"INFO ddagrab недоступен ({error}) — захват через GDI")
+            _say(f"INFO ddagrab недоступен ({error}) — захват через WGC")
+        if src["kind"] == "monitor":
+            try:
+                vin = _WgcInput(src, fps, self.stopping)
+                self.capture = "wgc"
+                return vin
+            except OSError as e:
+                _say(f"INFO WGC недоступен ({e}) — захват через GDI")
         self.capture = "gdigrab"
         return av.open("desktop", format="gdigrab",
                        options={"framerate": str(fps), "offset_x": str(src["x"]), "offset_y": str(src["y"]),
@@ -202,6 +247,7 @@ class Worker:
         first = next(frames)
         ctx = self._codec(first)
         reformat = None
+        source_size = (first.width, first.height)
         if first.format.name not in ("d3d11", ctx.pix_fmt) or (first.width, first.height) != self.size:
             from av.video.reformatter import VideoReformatter
             reformat = VideoReformatter()
@@ -224,8 +270,7 @@ class Worker:
                     raise
                 if paced:
                     time.sleep(max(0.0, t0 + i / self.fps - time.perf_counter()))
-                if frame.format.name != self.fmt or (frame.format.name == "d3d11"
-                                                     and (frame.width, frame.height) != self.size):
+                if frame.format.name != self.fmt or (frame.width, frame.height) != source_size:
                     raise FormatChanged(f"{frame.width}x{frame.height} {frame.format.name}")
             if time.monotonic() >= stat_at:
                 _say(f"STAT encoded={encoded} repeats={skipped}")

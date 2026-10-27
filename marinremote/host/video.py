@@ -281,7 +281,7 @@ class _Entry:
         self.failures = 0
         self.restart_handle = None
         self.lost = []               # when desktop duplication was lost lately
-        self.no_dda = False          # it keeps being lost on this monitor: GDI instead
+        self.no_dda = False          # it keeps being lost on this monitor: WGC (or GDI) instead
 
 
 class VideoService(Service):
@@ -312,6 +312,12 @@ class VideoService(Service):
         if self._background is None:
             self._background = [self.net.spawn(self._cursor_loop()), self.net.spawn(self._monitor_loop()),
                                 self.net.spawn(self._quality_loop())]
+
+    def rights_changed(self, s, old):
+        if s.has("view") and s.sid not in self.watches:
+            self.session_started(s)
+        elif not s.has("view") and s.sid in self.watches:
+            self.session_ended(s)
 
     def session_ended(self, s):
         w = self.watches.pop(s.sid, None)
@@ -456,7 +462,7 @@ class VideoService(Service):
             entry.lost = [t for t in entry.lost if now - t < 10] + [now]
             if len(entry.lost) >= 2 and not entry.no_dda:
                 entry.no_dda = True                # e.g. a monitor on another video adapter
-                print(f"encoder: desktop duplication keeps failing on {entry.monitor['dev']} — GDI", flush=True)
+                print(f"encoder: desktop duplication keeps failing on {entry.monitor['dev']} — WGC", flush=True)
             delay = 0.2
         else:
             entry.failures += 1

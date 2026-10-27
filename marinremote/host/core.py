@@ -10,11 +10,13 @@ Everything except the thread-safe entry points marked as such runs on the networ
 """
 
 import asyncio
+import hashlib
 import secrets
 import time
 
 from .. import protocol as P
 from ..auth import Limiter, MODES, PromptGate, ResumeTokens, decide, verify_password
+from ..codes import pair_code
 from ..config import VERSION
 from ..net import path_info, stop_stream
 from .session import HostSession
@@ -42,6 +44,10 @@ class Service:
     def session_ended(self, s):
         pass
 
+    def rights_changed(self, s, old):
+        """The host took some of the session's rights back, or gave them back (s.rights now)."""
+        pass
+
     def on_message(self, s, msg):
         return False
 
@@ -61,9 +67,15 @@ class HostEvents:
     def settings_changed(self):
         pass
 
+    def power_changed(self, info):
+        """A viewer locked this PC or asked for a restart or shutdown (state "scheduled"), or that
+        was called off ("cancelled")."""
+        pass
+
 
 class HostCore:
     PROMPT_TIMEOUT = 30
+    PAIR_TIMEOUT = 60            # pairing: time to compare the codes on both PCs
 
     def __init__(self, settings, node, journal, approver, events=None, limiter=None, gate=None,
                  tokens=None):
@@ -93,20 +105,27 @@ class HostCore:
         """Let `s` in (True) or turn it away (False, the connection is closed)."""
         s.name = hello["name"]
         via = path_info(s.conn)
-        if hello["resume"] and s.key not in (self.s["blocked"] or {}) and self.s["allow_incoming"]:
+        if hello["resume"] and not hello["pair"] and s.key not in (self.s["blocked"] or {}) \
+                and self.s["allow_incoming"]:
             entry = self.tokens.use(s.key, hello["resume"])
             if entry is not None:
                 old = self.sessions.get(entry["sid"])
                 if old is not None:
                     old.close(P.CLOSE_REPLACED, "replaced")
                 rights = [r for r in entry["rights"] if r in hello["want"]]
+                granted = [r for r in entry.get("granted", rights) if r in hello["want"]]
                 if rights:
-                    return await self._admit(s, rights, "resume")
+                    return await self._admit(s, rights, "resume", granted)
         kind, extra = decide(self.s, s.key, hello)
         if kind == "reject":
             self.journal.write("denied", s.key, name=s.name, reason=extra, via=via["via"])
             await s.refuse(extra)
             return False
+        if hello["pair"]:
+            code = await self._pair_code(s, hello)
+            if code is None:
+                return False
+            return await self._ask(s, hello, (self.s["trusted"] or {}).get(s.key), pair=code)
         if kind == "contact":
             return await self._admit(s, extra, "contact")
         if kind == "password":
@@ -131,7 +150,24 @@ class HostCore:
         await s.refuse("bad_password", wait)
         return False
 
-    async def _ask(self, s, hello, record):
+    async def _pair_code(self, s, hello):
+        """Swap the random numbers the pairing code is made of; None (refused) if the dialler
+        doesn't reveal the number it committed to."""
+        mine = secrets.token_bytes(32)
+        await s.write({"t": "pair.nonce", "n": mine.hex()})
+        try:
+            raw = await asyncio.wait_for(s.reader.next(), 10)
+        except asyncio.TimeoutError:
+            raw = None
+        msg = P.parse(raw) if raw else None
+        theirs = msg.get("n") if msg and msg["t"] == "pair.reveal" else None
+        if not isinstance(theirs, str) or not P.HEX64.match(theirs) \
+                or hashlib.sha256(bytes.fromhex(theirs)).hexdigest() != hello["pair"]["commit"]:
+            await s.refuse("protocol")
+            return None
+        return pair_code(s.key, self.node.id, bytes.fromhex(theirs), mine)
+
+    async def _ask(self, s, hello, record, pair=None):
         busy = self.gate.check(s.key)
         if busy is not None:
             reason, wait = busy
@@ -140,20 +176,21 @@ class HostCore:
             return False
         self._next_request += 1
         rid = self._next_request
+        timeout = self.PAIR_TIMEOUT if pair else self.PROMPT_TIMEOUT
         request = {"id": rid, "key": s.key, "fp": s.fp, "name": s.name, "want": hello["want"],
                    "record": dict(record) if record else None, "remember": hello["remember"],
-                   "password_given": bool(hello["password"]), "timeout": self.PROMPT_TIMEOUT,
-                   **path_info(s.conn)}
+                   "password_given": bool(hello["password"]), "timeout": timeout,
+                   "pair": pair, "unattended": bool(self.s["unattended"]), **path_info(s.conn)}
         self.journal.write("request", s.key, name=s.name, want=hello["want"], via=request["via"],
-                           relay=request["via_relay"])
+                           relay=request["via_relay"], pair=bool(pair) or None)
         self.gate.begin(s.key)
         refused = True
         try:
-            await s.write({"t": "auth.wait", "timeout": self.PROMPT_TIMEOUT})
+            await s.write({"t": "auth.wait", "timeout": timeout})
             ask = self.net.spawn(self.approver.ask(request))
             self._asks[rid] = ask
             gone = asyncio.ensure_future(s.conn.closed())
-            done, _ = await asyncio.wait({ask, gone}, timeout=self.PROMPT_TIMEOUT,
+            done, _ = await asyncio.wait({ask, gone}, timeout=timeout,
                                          return_when=asyncio.FIRST_COMPLETED)
             if ask not in done:
                 ask.cancel()
@@ -180,6 +217,9 @@ class HostCore:
                 await s.refuse("denied")
                 return False
             refused = False
+            if pair:
+                await self._paired(s, hello, rights, answer)
+                return False
             mode = answer.get("remember")
             if mode in MODES:
                 self.remember(s.key, (record or {}).get("name") or s.name, rights, mode)
@@ -189,10 +229,31 @@ class HostCore:
             self._asks.pop(rid, None)
             self.gate.end(s.key, refused)
 
-    async def _admit(self, s, rights, how):
+    async def _paired(self, s, hello, rights, answer):
+        """The person here compared the codes and said yes: the other PC comes in without asking
+        from now on, and it is among this PC's contacts to connect back to in one click. The
+        connection itself ends here — pairing is not a session."""
+        contact = (self.s["contacts"] or {}).get(s.key) or {}
+        name = contact.get("name") or s.name
+        self.remember(s.key, name, rights, "contact")
+        if answer.get("unattended") and not self.s["unattended"]:
+            self.s.set("unattended", True)
+        now = time.strftime("%Y-%m-%d %H:%M")
+        self.s.put("contacts", s.key, {**contact, "name": name, "host_name": s.name,
+                                       "relay": hello["pair"]["relay"] or contact.get("relay"),
+                                       "addrs": hello["pair"]["addrs"] or contact.get("addrs") or [],
+                                       "added": contact.get("added") or now, "last": now, "paired": now})
+        self.journal.write("paired", s.key, name=s.name, rights=rights)
+        self.events.settings_changed()
+        await s.last_word({"t": "pair", "ok": True, "name": self.s["name"], "rights": rights,
+                           "relay": self.node.addr["relay"], "addrs": self.node.addr["addrs"]},
+                          P.CLOSE_NORMAL, "paired")
+
+    async def _admit(self, s, rights, how, granted=None):
         s.sid = secrets.token_hex(8)
         s.rights, s.how, s.started = list(rights), how, time.time()
-        token = self.tokens.issue(s.key, s.rights, s.sid)
+        s.granted = P.clean_rights(set(s.rights) | set(granted or ()))
+        token = self.tokens.issue(s.key, s.rights, s.sid, s.granted)
         record = (self.s["trusted"] or {}).get(s.key)
         await s.write({"t": "auth", "ok": True, "sid": s.sid, "rights": s.rights, "resume": token,
                        "remembered": record.get("mode") if record else None,
@@ -271,6 +332,34 @@ class HostCore:
         if s is not None:
             self.tokens.revoke_session(sid)
             s.close(P.CLOSE_KICKED, "kicked")
+
+    def set_rights(self, sid, rights):
+        """Take rights back from a session or give them back — within what it was let in with."""
+        self.net.call(self._set_rights, sid, list(rights))
+
+    def _set_rights(self, sid, rights):
+        s = self.sessions.get(sid)
+        if s is None:
+            return
+        new = [r for r in P.clean_rights(rights) if r in s.granted]
+        if new == s.rights:
+            return
+        old, s.rights = s.rights, new
+        self.tokens.set_rights(sid, new)
+        s.post({"t": "rights", "rights": new})
+        self.journal.write("rights", s.key, name=s.name, sid=sid, rights=new, was=old)
+        for svc in self.services:
+            svc.rights_changed(s, old)
+        self._changed()
+
+    def cancel_power(self):
+        """The person here calls off a restart or shutdown a viewer asked for."""
+        self.net.call(self._cancel_power)
+
+    def _cancel_power(self):
+        for svc in self.services:
+            if hasattr(svc, "cancel_pending"):
+                self.net.spawn(svc.cancel_pending("host"))
 
     def kill_all(self, reason="killed"):
         """End every session and voids every token; pending questions are refused."""

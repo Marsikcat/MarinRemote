@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from .. import auth
-from ..codes import fingerprint, make_code, parse_code, pretty, relay_label
+from ..codes import fingerprint, make_code, make_link, parse_code, pretty, relay_label
 from ..config import DISCOVERY_PORT, INSTANCE, PEER_PORT, VERSION
 from ..hotkeys import KillHotkey, Recorder, describe
 from ..protocol import RIGHT_NAMES, RIGHTS, describe_rights
@@ -22,7 +22,8 @@ from ..system import autostart_enabled, is_elevated, open_firewall, set_autostar
 from . import icons
 from .approve import ApproveDialog
 from .journalview import JournalView
-from .overlay import Indicators
+from .overlay import Indicators, control_button
+from .pair import PairDialog
 from .session_window import SessionWindow
 from .theme import GREEN, YELLOW, mono_font, style_window
 from .widgets import button, card, clear_layout, dot, hbox, label, note, switch_row
@@ -137,13 +138,16 @@ class MainWindow(QMainWindow):
         approver.withdrawn.connect(self._withdraw)
         bridge.sessions.connect(self._on_sessions)
         bridge.settings.connect(self._refresh_access)
+        bridge.settings.connect(self._refresh_contacts)
         bridge.journal.connect(self._journal_add)
+        bridge.power.connect(self._on_power)
+        self.power_box = None
         journal.listeners.append(bridge.journal_entry)
         self.node_signals = NodeSignals()
         self.node_signals.changed.connect(self._on_node)
         node.listeners.append(self.node_signals.changed.emit)
 
-        self.indicators = Indicators(core.disconnect, lambda: core.kill_all())
+        self.indicators = Indicators(core.disconnect, lambda: core.kill_all(), core.set_rights)
         self._make_tray()
         self.hotkey = KillHotkey(settings)
         self.hotkey.triggered.connect(self._kill_all)
@@ -171,8 +175,10 @@ class MainWindow(QMainWindow):
         self.code_label.setFont(mono_font(12))
         cl.addWidget(self.code_label)
         self.copy_btn = button("Копировать код", None, self._copy_code)
+        self.link_btn = button("Ссылка", "small", self._copy_link,
+                               tip="Ссылка marinremote://… — открывается щелчком там, где MarinRemote установлен")
         self.name_label = label("", "muted")
-        cl.addWidget(hbox(self.copy_btn, self.name_label, None,
+        cl.addWidget(hbox(self.copy_btn, self.link_btn, self.name_label, None,
                           button("Переименовать", "small", self._rename)))
         self.net_dot = dot(YELLOW)
         self.net_label = label("", "muted")
@@ -237,6 +243,40 @@ class MainWindow(QMainWindow):
         self.copy_btn.setText("Скопировано ✓")
         QTimer.singleShot(1800, lambda: self.copy_btn.setText("Копировать код"))
 
+    def _copy_link(self):
+        QGuiApplication.clipboard().setText(make_link(self.node.id, self.node.addr.get("relay")))
+        self.link_btn.setText("Скопировано ✓")
+        QTimer.singleShot(1800, lambda: self.link_btn.setText("Ссылка"))
+
+    def open_link(self, text):
+        """A marinremote:// link (or `--connect <code>`) from outside: asks, then connects."""
+        self.show_window()
+        try:
+            target = parse_code(text)
+        except ValueError as e:
+            QMessageBox.warning(self, "Ссылка MarinRemote", f"По этой ссылке не подключиться: {e}.")
+            return
+        if target["id"] == self.node.id:
+            QMessageBox.information(self, "Ссылка MarinRemote", "Это ссылка на этот же компьютер.")
+            return
+        contact = (self.s["contacts"] or {}).get(target["id"])
+        want = [r for r, cb in self.want_boxes.items() if cb.isChecked()]
+        who = (f"к «{contact.get('name') or 'ПК'}» из ваших контактов" if contact
+               else "к ПК, которого нет в ваших контактах")
+        if QMessageBox.question(
+                self, "Ссылка MarinRemote",
+                f"Подключиться {who}?\nОтпечаток: {fingerprint(target['id'])}\nЗапросить: "
+                f"{describe_rights(want) if want else 'ничего не отмечено'}\n\n"
+                f"Ссылку открыли из браузера или другой программы. Подключайтесь, только если вы её ждали: "
+                f"тот ПК увидит имя этого, а с буфером обмена — и скопированный во время сеанса текст."
+                ) != QMessageBox.Yes:
+            return
+        if contact:
+            target["name"] = contact.get("name")
+            target["addrs"] = contact.get("addrs") or []
+        self.nav.button(self.CONNECT_PAGE).click()
+        self.open_session(target)
+
     def _rename(self):
         name, ok = QInputDialog.getText(self, "Имя этого ПК", "Так этот ПК увидят другие:", text=self.s["name"])
         if ok and name.strip():
@@ -260,8 +300,10 @@ class MainWindow(QMainWindow):
         for s in sessions:
             text = label(f"<b>{s['name']}</b> · {s['fp']} · {describe_rights(s['rights'])}"
                          f" · {'через ретранслятор' if s.get('via_relay') else 'напрямую'}")
-            self.sessions_box.addWidget(row(text, button("Отключить", "danger",
-                                                         lambda _=False, sid=s["sid"]: self.core.disconnect(sid))))
+            buttons = [b for b in (control_button(s, self.core.set_rights),
+                                   button("Отключить", "danger", lambda _=False, sid=s["sid"]: self.core.disconnect(sid)))
+                       if b is not None]
+            self.sessions_box.addWidget(row(text, *buttons))
         self.kill_hint.setText(f"Разорвать все сеансы сразу, где бы ни был фокус: "
                                f"<b>{describe(self.s['kill_hotkey'])}</b>.")
         self.kill_hint.setTextFormat(Qt.RichText)
@@ -273,6 +315,35 @@ class MainWindow(QMainWindow):
                                                  if active else "никто не подключён"))
         self.kill_action.setEnabled(active)
         self._lock_access(any("control" in s["rights"] for s in sessions))
+
+    def _on_power(self, info):
+        action, who = info.get("action"), f"«{info.get('name')}»"
+        if info.get("state") == "cancelled":
+            if self.power_box is not None:
+                self.power_box.close()
+            what = {"restart": "Перезагрузка", "shutdown": "Выключение"}.get(action, "Действие")
+            self.tray.showMessage("MarinRemote", f"{what} отменено.", icons.app_icon(True), 4000)
+            return
+        if action == "lock":
+            self.tray.showMessage("MarinRemote", f"{who} заблокировал экран этого ПК.", icons.app_icon(True), 5000)
+            return
+        what = {"restart": "перезагрузить", "shutdown": "выключить"}.get(action, action)
+        if self.power_box is not None:
+            self.power_box.close()
+        box = QMessageBox(QMessageBox.Warning, "MarinRemote",
+                          f"{who} ({info.get('fp')}) попросил {what} этот ПК — это случится через "
+                          f"{info.get('delay')} с.\n\nЕсли это не вы, отмените и отключите его.")
+        box.setWindowFlag(Qt.WindowStaysOnTopHint)
+        stop = box.addButton("Отменить", QMessageBox.RejectRole)
+        box.addButton("Пусть", QMessageBox.AcceptRole)
+        box.setDefaultButton(stop)
+        box.setAttribute(Qt.WA_DeleteOnClose)
+        stop.clicked.connect(lambda: self.core.cancel_power())
+        box.destroyed.connect(lambda _=None, b=box: self.power_box is b and setattr(self, "power_box", None))
+        QTimer.singleShot(int(info.get("delay") or 30) * 1000, box, box.close)
+        self.power_box = box
+        box.show()
+        box.raise_()
 
     def _kill_all(self):
         if self.sessions:
@@ -395,7 +466,9 @@ class MainWindow(QMainWindow):
             text = label(f"<b>{v['name'] or 'ПК'}</b> · {fingerprint(key)} · {v['ip']}")
             go = button("Подключиться", "small",
                         lambda _=False, k=key, n=v["name"]: self.open_session({"id": k, "relay": None, "name": n}))
-            self.lan_box.addWidget(row(dot(GREEN, 8), text, go, stretch_at=1))
+            link = button("Связать", "small", lambda _=False, k=key, n=v["name"]: self._pair(k, n),
+                          tip="Свой ПК: оба запомнят друг друга и дальше будут подключаться без подтверждения")
+            self.lan_box.addWidget(row(dot(GREEN, 8), text, link, go, stretch_at=1))
 
     def _connect_contact(self, key):
         c = (self.s["contacts"] or {}).get(key) or {}
@@ -403,10 +476,24 @@ class MainWindow(QMainWindow):
                            "name": c.get("name")}, self.password_edit.text())
         self.password_edit.clear()
 
+    def _pair(self, key, name):
+        lan = self.node.discovered().get(key) or {}
+        contact = (self.s["contacts"] or {}).get(key) or {}
+        target = {"id": key, "relay": contact.get("relay"), "addrs": contact.get("addrs") or [],
+                  "name": name or lan.get("name") or "ПК"}
+        dlg = PairDialog(self, self.s, self.node, self.core, target)
+        dlg.finished.connect(lambda _=0: self._refresh_contacts())
+        dlg.show()
+
     def _contact_menu(self, key, anchor):
         menu = QMenu(self)
         rename = menu.addAction("Переименовать")
         code = menu.addAction("Скопировать код")
+        link = menu.addAction("Скопировать ссылку")
+        pair = menu.addAction("Связать (оба ПК запомнят друг друга)")
+        pair.setEnabled(key in self.node.discovered())
+        if not pair.isEnabled():
+            pair.setText(pair.text() + " — только когда ПК в этой сети")
         menu.addSeparator()
         remove = menu.addAction("Удалить из контактов")
         act = menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
@@ -418,6 +505,10 @@ class MainWindow(QMainWindow):
                 self.s.put("contacts", key, c)
         elif act is code:
             QGuiApplication.clipboard().setText(make_code(key, c.get("relay")))
+        elif act is link:
+            QGuiApplication.clipboard().setText(make_link(key, c.get("relay")))
+        elif act is pair:
+            self._pair(key, c.get("name"))
         elif act is remove:
             self.s.put("contacts", key, None)
         self._refresh_contacts()
@@ -624,7 +715,7 @@ class MainWindow(QMainWindow):
         self._on_sessions(self.sessions)
 
     # ═════════════════════════ settings ════════════════════════════
-    SETTINGS_PAGE = 4
+    CONNECT_PAGE, SETTINGS_PAGE = 1, 4
 
     def _page_settings(self):
         area, lay = page("Настройки")
