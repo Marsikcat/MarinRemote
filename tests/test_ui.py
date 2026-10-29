@@ -211,6 +211,74 @@ def test_settings_tell_about_a_new_version(app, window):
     assert [e["action"] for e in win.journal.read() if e["event"] == "roots"] == ["all_drives_on", "all_drives_off"]
 
 
+def test_files_only_question_says_so(app):
+    from PySide6.QtWidgets import QLabel
+    from marinremote.ui.approve import ApproveDialog
+    dlg = ApproveDialog(dict(REQUEST, want=["files"]))
+    texts = " ".join(lb.text() for lb in dlg.findChildren(QLabel))
+    assert "хочет обменяться файлами" in texts and "экран этого ПК он не увидит" in texts
+    assert [r for r, cb in dlg.boxes.items() if cb.isEnabled()] == ["files"]
+    dlg.withdraw()
+    full = ApproveDialog(dict(REQUEST))
+    assert "хочет подключиться" in " ".join(lb.text() for lb in full.findChildren(QLabel))
+    full.withdraw()
+
+
+def test_files_only_from_a_contact(app, window, tmp_path):
+    """«Файлы» at a contact: one right asked for, the panels straight away; when the other PC ends it
+    the panels stay with a strip saying so, and «Подключиться снова» brings its folders back."""
+    from PySide6.QtWidgets import QPushButton
+    from marinremote.host.core import Approver
+    from marinremote.host.files import FilesService
+
+    class Grant(Approver):
+        def __init__(self):
+            self.asked = []
+
+        async def ask(self, request):
+            self.asked.append(request)
+            return {"allow": True, "rights": list(request["want"]), "remember": None, "block": False}
+
+    win, node, _, _ = window
+    hs = Settings(tmp_path / "host")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "a.txt").write_text("привет", encoding="utf-8")
+    hs["roots"] = [{"id": "home", "path": str(shared), "label": "Общая"}]
+    host = Node(hs.secret_key, port=0, mode="lan", bind_host="127.0.0.1", lan=False)
+    host.start()
+    grant = Grant()
+    core = HostCore(hs, host, Journal(tmp_path / "host.jsonl"), grant)
+    core.services.append(FilesService(core))
+    try:
+        win.s.put("contacts", host.id, {"name": "хост", "relay": None, "addrs": [f"127.0.0.1:{host.port}"]})
+        win._refresh_contacts()
+        [files] = [b for b in win.findChildren(QPushButton) if b.text() == "Файлы"]
+        files.click()
+        fw = win.file_windows[host.id]
+        pump(app, lambda: fw.manager is not None and fw.manager.remote.rowCount() == 1, timeout=15)
+        assert grant.asked[0]["want"] == ["files"]
+        [s] = core.sessions.values()
+        assert s.rights == ["files"] and fw.manager.remote.entries[0]["n"] == "a.txt"
+        assert host.id not in win.viewers
+
+        core.disconnect(s.sid)
+        pump(app, lambda: not fw.retry_btn.isHidden())         # the window has heard it is over
+        assert fw.stack.currentWidget() is fw.manager and not fw.warn.isHidden()
+        assert "завершил" in fw.warn.text.text()
+        fw.manager.root_box.clear()
+        fw.retry_btn.click()
+        pump(app, lambda: fw.session.state == "connected" and fw.manager.root_box.count() == 1, timeout=15)
+        assert fw.warn.isHidden() and len(grant.asked) == 2
+
+        win.open_files({"id": host.id, "relay": None})          # again: the same window
+        assert list(win.file_windows.values()) == [fw]
+        fw.close()
+        pump(app, lambda: not win.file_windows)
+    finally:
+        host.stop()
+
+
 def test_file_manager_says_where_other_folders_are_opened(app):
     from concurrent.futures import Future
     from marinremote.ui.filemanager import FileManager

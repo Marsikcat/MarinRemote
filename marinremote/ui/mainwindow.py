@@ -22,6 +22,7 @@ from ..protocol import RIGHT_NAMES, RIGHTS, describe_rights
 from ..system import autostart_enabled, is_elevated, open_firewall, set_autostart
 from . import icons
 from .approve import ApproveDialog
+from .files_window import FilesWindow
 from .journalview import JournalView
 from .overlay import Indicators, control_button
 from .pair import PairDialog
@@ -30,6 +31,7 @@ from .theme import GREEN, YELLOW, mono_font, style_window
 from .widgets import button, card, clear_layout, dot, hbox, label, note, switch_row
 
 _jobs = set()
+FILES_TIP = "Только файлы: без картинки экрана и управления — тот ПК увидит, что просят лишь файлы"
 
 
 class _Job(QObject):
@@ -100,6 +102,7 @@ class MainWindow(QMainWindow):
         self.sessions = []                # this PC's sessions (dicts from the core)
         self.dialogs = {}                 # request id -> ApproveDialog
         self.viewers = {}                 # remote key -> SessionWindow
+        self.file_windows = {}            # remote key -> FilesWindow («Только файлы»)
         self._tray_told = False
         self._tray_click = None           # what a click on the tray's next message opens
         self.update_info = None
@@ -444,7 +447,8 @@ class MainWindow(QMainWindow):
         self.code_edit.setPlaceholderText("Вставьте код: mr-…")
         self.code_edit.setFont(mono_font(11))
         self.code_edit.returnPressed.connect(self._connect_code)
-        cl.addWidget(hbox(self.code_edit, button("Подключиться", None, self._connect_code)))
+        cl.addWidget(hbox(self.code_edit, button("Подключиться", None, lambda: self._connect_code()),
+                          button("Только файлы", "secondary", lambda: self._connect_code(files=True), tip=FILES_TIP)))
         self.code_error = label("", "error", wrap=True)
         self.code_error.hide()
         cl.addWidget(self.code_error)
@@ -484,7 +488,7 @@ class MainWindow(QMainWindow):
     def _want_changed(self):
         self.s.set("want_rights", [r for r, cb in self.want_boxes.items() if cb.isChecked()])
 
-    def _connect_code(self):
+    def _connect_code(self, files=False):
         self.code_error.hide()
         try:
             target = parse_code(self.code_edit.text())
@@ -500,11 +504,13 @@ class MainWindow(QMainWindow):
         if contact:
             target["name"] = contact.get("name")
             target["addrs"] = contact.get("addrs") or []
-        self.open_session(target, self.password_edit.text())
+        self.open_session(target, self.password_edit.text(), files=files)
         self.code_edit.clear()
         self.password_edit.clear()
 
-    def open_session(self, target, password=None):
+    def open_session(self, target, password=None, files=False):
+        if files:
+            return self.open_files(target, password)
         want = [r for r, cb in self.want_boxes.items() if cb.isChecked()]
         if not want:
             self.code_error.setText("Отметьте, что запросить: хотя бы просмотр экрана.")
@@ -526,6 +532,28 @@ class MainWindow(QMainWindow):
         self.viewers.pop(key, None)
         self._refresh_contacts()
 
+    def open_files(self, target, password=None):
+        """«Только файлы» with that PC — or «Файлы» of the session already open with it, which needs
+        no second connection and no second confirmation there."""
+        key = target["id"]
+        view = self.viewers.get(key)
+        if view is not None and view.session.state == "connected" and "files" in view.session.rights:
+            view.open_files()
+            return
+        win = self.file_windows.get(key)
+        if win is None:
+            target.setdefault("addrs", [])
+            win = FilesWindow(self.s, self.node, target, password=password or None)
+            win.finished.connect(self._files_closed)
+            self.file_windows[key] = win
+        win.showNormal()
+        win.raise_()
+        win.activateWindow()
+
+    def _files_closed(self, key):
+        self.file_windows.pop(key, None)
+        self._refresh_contacts()
+
     def _refresh_contacts(self):
         lan = self.node.discovered()
         contacts = dict(self.s["contacts"] or {})
@@ -539,8 +567,11 @@ class MainWindow(QMainWindow):
                          + (" · в локальной сети" if here else ""))
             more = button("⋯", "small", tip="Ещё")
             more.clicked.connect(lambda _=False, k=key, b=more: self._contact_menu(k, b))
+            files = button("Файлы", "small", lambda _=False, k=key: self._connect_contact(k, files=True),
+                           tip=FILES_TIP)
             go = button("Подключиться", "small", lambda _=False, k=key: self._connect_contact(k))
-            self.contacts_box.addWidget(row(dot(GREEN if here else "#80848e", 8), text, go, more, stretch_at=1))
+            self.contacts_box.addWidget(row(dot(GREEN if here else "#80848e", 8), text, files, go, more,
+                                            stretch_at=1))
         clear_layout(self.lan_box)
         others = {k: v for k, v in lan.items() if k not in contacts}
         if not others:
@@ -552,12 +583,15 @@ class MainWindow(QMainWindow):
                         lambda _=False, k=key, n=v["name"]: self.open_session({"id": k, "relay": None, "name": n}))
             link = button("Связать", "small", lambda _=False, k=key, n=v["name"]: self._pair(k, n),
                           tip="Свой ПК: оба запомнят друг друга и дальше будут подключаться без подтверждения")
-            self.lan_box.addWidget(row(dot(GREEN, 8), text, link, go, stretch_at=1))
+            files = button("Файлы", "small",
+                           lambda _=False, k=key, n=v["name"]: self.open_files({"id": k, "relay": None, "name": n}),
+                           tip=FILES_TIP)
+            self.lan_box.addWidget(row(dot(GREEN, 8), text, link, files, go, stretch_at=1))
 
-    def _connect_contact(self, key):
+    def _connect_contact(self, key, files=False):
         c = (self.s["contacts"] or {}).get(key) or {}
         self.open_session({"id": key, "relay": c.get("relay"), "addrs": c.get("addrs") or [],
-                           "name": c.get("name")}, self.password_edit.text())
+                           "name": c.get("name")}, self.password_edit.text(), files=files)
         self.password_edit.clear()
 
     def _pair(self, key, name):
@@ -976,7 +1010,7 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
     def shutdown(self):
-        for win in list(self.viewers.values()):
+        for win in list(self.viewers.values()) + list(self.file_windows.values()):
             win.close()
         self.indicators.close()
         self.tray.hide()

@@ -18,7 +18,7 @@ from marinremote.host.core import Approver, HostCore
 from marinremote.host.files import FilesService
 from marinremote.journal import Journal
 from marinremote.net import Node
-from marinremote.viewer.files import FileClient
+from marinremote.viewer.files import NO_LINE, FileClient
 from marinremote.viewer.session import ViewerSession
 
 MB = 1 << 20
@@ -278,6 +278,24 @@ def test_without_the_files_right_nothing_happens(tmp_path, monkeypatch):
         assert not fut.done()
         assert not (p.root / "u.bin").exists()
         assert {e["what"] for e in p.events("violation")} >= {"fs.list", "put"}
+    finally:
+        p.close()
+
+
+def test_a_folder_request_without_a_line_is_answered_at_once(tmp_path):
+    """Asked before the line is up, or on a line that then dropped, a folder request hears «no line»
+    instead of waiting for an answer that can never come."""
+    p = Pair(tmp_path, rights=("view",))             # without the right the host never answers
+    try:
+        early = FileClient(ViewerSession(p.viewer, {"id": p.host.id, "relay": None, "addrs": []}, ["files"], "x"))
+        assert early.request({"t": "fs.roots"}).result(5) == NO_LINE
+        s, fc = p.connect()
+        fut = fc.request({"t": "fs.list", "path": "home"})
+        time.sleep(0.5)
+        assert not fut.done()
+        p.drop(s)
+        assert fut.result(15) == NO_LINE                 # failed once the session came back
+        until(lambda: s.state == "connected")
     finally:
         p.close()
 

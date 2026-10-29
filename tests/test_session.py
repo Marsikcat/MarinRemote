@@ -161,6 +161,23 @@ def test_approved_with_fewer_rights(pair):
     assert [e["event"] for e in pair.events()] == ["request", "approved", "session_start"]
 
 
+def test_files_only_approval_keeps_what_else_was_remembered(pair):
+    """Remembered with everything, asked for files alone: remembering it again changes only what was
+    asked about this time."""
+    pair.hs.put("trusted", pair.viewer.id, {"name": "ноут", "rights": ALL, "mode": "ask", "added": ""})
+    pair.approver.answer = approve(["files"], remember="ask")
+    s = pair.connect(want=["files"])
+    s.events_rec.wait(s, "connected")
+    assert s.rights == ["files"] and pair.approver.asked[0]["want"] == ["files"]
+    assert pair.hs["trusted"][pair.viewer.id]["rights"] == ALL
+    s.stop()
+    # asked for the picture and files, let in with the picture only: files are forgotten, the rest stays
+    pair.approver.answer = approve(["view"], remember="ask")
+    s = pair.connect(want=["view", "files"])
+    s.events_rec.wait(s, "connected")
+    assert pair.hs["trusted"][pair.viewer.id]["rights"] == ["view", "control", "clipboard"]
+
+
 def test_denied(pair):
     pair.approver.answer = {"allow": False}
     s = pair.connect()

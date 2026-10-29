@@ -138,7 +138,7 @@ class SessionWindow(QWidget):
                                                       lambda: self.session.post({"t": "power", "action": "cancel"}))
         self.power_cancel.setEnabled(False)
         self.power_btn.setMenu(self.power_menu)
-        self.files_btn = button("Файлы", "small", self._open_files,
+        self.files_btn = button("Файлы", "small", self.open_files,
                                 tip="Файлы этого и удалённого ПК; файлы можно и просто перетащить на картинку")
         self.stats_btn = button("Статистика", "small", self._toggle_stats)
         self.stats_btn.setCheckable(True)
@@ -235,6 +235,8 @@ class SessionWindow(QWidget):
         if st != self._last_state:
             self._last_state = st
             self._had_control = "control" in session.rights
+            if st == "connected" and self.file_manager is not None:
+                self.file_manager.reload()
         self.title.setText(self._name())
         self.setWindowTitle(f"{self._name()} — MarinRemote")
         self.dot.setStyleSheet(f"background: {STATE_COLOR.get(st, YELLOW)}; border-radius: 5px;")
@@ -267,13 +269,7 @@ class SessionWindow(QWidget):
                 self.info.show()
         elif st == "closed":
             self.clock_timer.stop()
-            d = session.detail
-            if d.get("reason") == "refused":
-                text = AUTH_REASONS.get(d.get("auth"), "Подключение отклонено.")
-                text = text.format(wait=wait_text(d.get("retry_after") or 1))
-            else:
-                text = END_TEXT.get(d.get("reason"), "Сеанс завершён.")
-            self.small.setText(text)
+            self.small.setText(end_text(session.detail))
         elif st != "waiting":
             self.small.setText("")
         if watching:
@@ -423,9 +419,10 @@ class SessionWindow(QWidget):
             s.post({"t": "clip", "text": text})
 
     # ── files ───────────────────────────────────────────────────────
-    def _open_files(self):
+    def open_files(self):
         if self.file_manager is None:
-            self.file_manager = FileManager(self.files, self._name(), self.session.host.get("ver", ""))
+            self.file_manager = FileManager(self.files, self._name(), self.session.host.get("ver", ""),
+                                            control="control" in self.session.rights)
             self.file_manager.destroyed.connect(self._files_closed)
         self.file_manager.showNormal()
         self.file_manager.raise_()
@@ -451,9 +448,9 @@ class SessionWindow(QWidget):
         fm = self.file_manager
         if fm is not None and fm.remote_dir:
             fm.send(paths)
-            self._open_files()
+            self.open_files()
             return
-        self._open_files()
+        self.open_files()
 
         def got_roots(reply):
             roots = reply.get("roots") or []
@@ -564,28 +561,11 @@ class SessionWindow(QWidget):
 
     # ── contacts ────────────────────────────────────────────────────
     def _remember_contact(self):
-        """A saved contact learns where the PC is now (its relay, addresses) and when we last met."""
-        contact = (self.s["contacts"] or {}).get(self.key)
-        host = self.session.host
-        if contact is None:
-            return
-        self.s.put("contacts", self.key, {**contact, "host_name": host.get("name", ""),
-                                          "relay": host.get("relay") or contact.get("relay"),
-                                          "addrs": host.get("addrs") or contact.get("addrs") or [],
-                                          "last": time.strftime("%Y-%m-%d %H:%M")})
+        remember_contact(self.s, self.key, self.session.host)
 
     def _save_contact(self):
-        host = self.session.host
-        name, ok = QInputDialog.getText(self, "Сохранить в контакты", "Как назвать этот ПК:",
-                                        text=host.get("name") or self.target.get("name") or "")
-        if not ok:
-            return
-        self.s.put("contacts", self.key, {
-            "name": name.strip() or host.get("name") or "ПК", "host_name": host.get("name", ""),
-            "relay": host.get("relay") or self.target.get("relay"),
-            "addrs": host.get("addrs") or self.target.get("addrs") or [],
-            "added": time.strftime("%Y-%m-%d %H:%M"), "last": time.strftime("%Y-%m-%d %H:%M")})
-        self._on_state(self.session)
+        if save_contact(self, self.s, self.key, self.session.host, self.target):
+            self._on_state(self.session)
 
     def closeEvent(self, e):
         self.timer.stop()
@@ -606,3 +586,36 @@ class SessionWindow(QWidget):
 
 def _held(vk):
     return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
+
+
+def end_text(detail):
+    """Why a session is over, in words (the detail of its "closed" state)."""
+    if detail.get("reason") == "refused":
+        text = AUTH_REASONS.get(detail.get("auth"), "Подключение отклонено.")
+        return text.format(wait=wait_text(detail.get("retry_after") or 1))
+    return END_TEXT.get(detail.get("reason"), "Сеанс завершён.")
+
+
+def remember_contact(settings, key, host):
+    """A saved contact learns where the PC is now (its relay, addresses) and when we last met."""
+    contact = (settings["contacts"] or {}).get(key)
+    if contact is None:
+        return
+    settings.put("contacts", key, {**contact, "host_name": host.get("name", ""),
+                                   "relay": host.get("relay") or contact.get("relay"),
+                                   "addrs": host.get("addrs") or contact.get("addrs") or [],
+                                   "last": time.strftime("%Y-%m-%d %H:%M")})
+
+
+def save_contact(parent, settings, key, host, target):
+    """«Сохранить в контакты»: asks what to call the PC; True once it is saved."""
+    name, ok = QInputDialog.getText(parent, "Сохранить в контакты", "Как назвать этот ПК:",
+                                    text=host.get("name") or target.get("name") or "")
+    if not ok:
+        return False
+    settings.put("contacts", key, {
+        "name": name.strip() or host.get("name") or "ПК", "host_name": host.get("name", ""),
+        "relay": host.get("relay") or target.get("relay"),
+        "addrs": host.get("addrs") or target.get("addrs") or [],
+        "added": time.strftime("%Y-%m-%d %H:%M"), "last": time.strftime("%Y-%m-%d %H:%M")})
+    return True

@@ -104,11 +104,16 @@ class FileTable(QTableWidget):
 
 
 class FileManager(QWidget):
-    def __init__(self, files, host_name, host_ver=""):
-        super().__init__(None, Qt.Window)
+    """A window of its own — or, given a parent, the inside of one («Только файлы»). `control`: this
+    session controls the other PC, which locks its access settings while it lasts."""
+
+    def __init__(self, files, host_name, host_ver="", parent=None, control=True):
+        super().__init__(parent, Qt.Widget if parent is not None else Qt.Window)
         self.files = files
         self.host_name, self.host_ver = host_name, host_ver
-        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.control = control
+        if parent is None:
+            self.setAttribute(Qt.WA_DeleteOnClose)
         self.setObjectName("Root")
         self.setWindowTitle(f"Файлы — {host_name}")
         self.setWindowIcon(icons.app_icon())
@@ -209,10 +214,14 @@ class FileManager(QWidget):
         fut.add_done_callback(lambda f: self.replies.got.emit(callback, f.result()))
 
     def set_client(self, files):
-        """The session started again: a new client, the same window."""
+        """The session started again: a new client, the same window. Its folders come with
+        reload(), once it is connected — asked before that, nothing would answer."""
         self.files = files
         self._rows = {}
         self.table.setRowCount(0)
+
+    def reload(self):
+        """The line is (back) up: the other PC's folders again, where we were."""
         self.ask({"t": "fs.roots"}, self._got_roots)
 
     # ── here ────────────────────────────────────────────────────────
@@ -279,7 +288,7 @@ class FileManager(QWidget):
             f"открывают на нём самом: «Доступ» → «Папки для файлов» → «Все диски этого ПК»"
             + (f" (там MarinRemote {self.host_ver or 'старой версии'}: сначала обновите его до 0.2.0)." if old
                else ". Пока к нему подключены с управлением, эти настройки там заблокированы — включите "
-                    "заранее или отключитесь на минуту."))
+                    "заранее или отключитесь на минуту." if self.control else "."))
         self.remote_hint.show()
 
     def open_remote(self, path):

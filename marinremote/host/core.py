@@ -222,7 +222,9 @@ class HostCore:
                 return False
             mode = answer.get("remember")
             if mode in MODES:
-                self.remember(s.key, (record or {}).get("name") or s.name, rights, mode)
+                # what it didn't ask for this time («Только файлы») stays as it was remembered
+                kept = [r for r in P.clean_rights((record or {}).get("rights")) if r not in hello["want"]]
+                self.remember(s.key, (record or {}).get("name") or s.name, rights + kept, mode)
             self.journal.write("approved", s.key, name=s.name, rights=rights, remember=mode)
             return await self._admit(s, rights, "approved")
         finally:

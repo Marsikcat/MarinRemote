@@ -26,6 +26,7 @@ from ..transfer import PRIORITY, Speed, receive_file, send_file, unique_name
 
 MAX_ACTIVE = 2
 ACTIVE = ("starting", "running", "finishing")
+NO_LINE = {"ok": False, "msg": "нет связи с удалённым ПК"}
 
 
 class Transfer:
@@ -100,6 +101,11 @@ class FileClient:
     # ── session handler (network thread) ────────────────────────────
     def connected(self, session):
         """(Re)connected: whatever was on its way when the line dropped carries on by itself."""
+        # questions asked on the line that dropped: their answers will never come
+        for fut in self._requests.values():
+            if not fut.done():
+                fut.set_result(dict(NO_LINE))
+        self._requests.clear()
         for t in self.transfers.values():
             if t.state in ACTIVE or (t.state == "interrupted" and self._ever_connected):
                 t.state, t.error = "queued", ""
@@ -370,9 +376,12 @@ class FileClient:
 
     # ── folders ─────────────────────────────────────────────────────
     def _ask(self, msg):
+        fut = asyncio.get_running_loop().create_future()
+        if self.session.queue is None:              # not connected: nobody would ever answer
+            fut.set_result(dict(NO_LINE))
+            return fut
         self._next_id += 1
         rid = self._next_id
-        fut = asyncio.get_running_loop().create_future()
         self._requests[rid] = fut
         self.session.post({**msg, "id": rid})
         return fut

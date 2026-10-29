@@ -41,7 +41,9 @@ class ApproveDialog(QDialog):
         lay.setContentsMargins(22, 20, 22, 18)
         lay.setSpacing(10)
         record = request.get("record") or {}
+        files_only = not self.pair and (request.get("want") or []) == ["files"]
         title = label(f"«{request['name']}» хочет " + ("связаться с этим компьютером" if self.pair else
+                                                         "обменяться файлами с этим компьютером" if files_only else
                                                          "подключиться к этому компьютеру"), "h2", wrap=True)
         lay.addWidget(title)
         who = [f"Устройство <b>{request['fp']}</b>"]
@@ -54,6 +56,9 @@ class ApproveDialog(QDialog):
         info = label(" · ".join(who), "muted", wrap=True)
         info.setTextFormat(Qt.RichText)
         lay.addWidget(info)
+        if files_only:
+            lay.addWidget(label("Только файлы: экран этого ПК он не увидит и управлять им не сможет. Ему "
+                                "откроются лишь папки из «Доступ» → «Папки для файлов».", "hint", wrap=True))
         if self.pair:
             code = label(self.pair)
             code.setFont(mono_font(26))
