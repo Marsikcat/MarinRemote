@@ -120,8 +120,8 @@ class InputService(Service):
             except Exception:
                 code, app = None, ""
             for sid, s in list(self.sessions.items()):
-                if self.warned.get(sid, "") != code:
-                    self.warned[sid] = code
+                if self.warned.get(sid) != (code, app):
+                    self.warned[sid] = (code, app)
                     s.post({"t": "warn", "code": code, "app": app})
             await asyncio.sleep(GUARD_EVERY)
 

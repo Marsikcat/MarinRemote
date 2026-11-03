@@ -257,6 +257,8 @@ def test_the_viewer_is_told_what_input_cant_reach(tmp_path):
                                                         probe=lambda: state["code"])
     try:
         until(lambda: any(m["t"] == "warn" and m["code"] == "uipi" and m["app"] == "Taskmgr.exe" for m in msgs.msgs))
+        state["code"] = ("uipi", "regedit.exe")
+        until(lambda: msgs.msgs[-1] == {"t": "warn", "code": "uipi", "app": "regedit.exe"})
         state["code"] = (None, "")
         until(lambda: msgs.msgs[-1] == {"t": "warn", "code": None, "app": ""})
     finally:

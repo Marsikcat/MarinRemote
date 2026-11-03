@@ -65,10 +65,14 @@ VIDEO_REASONS = {
     "error": "Не удалось захватить экран удалённого ПК — пробуем снова…",
 }
 WARNINGS = {
-    "uipi": "На удалённом ПК впереди окно, запущенное от имени администратора{app}. Управлять им "
-            "MarinRemote не может — это ограничение Windows; картинку при этом видно.",
+    "uipi": "На удалённом ПК активно окно с повышенными правами{app}. Windows блокирует мышь и "
+            "клавиатуру MarinRemote, пока оно активно. Человеку у того ПК нужно закрыть это окно "
+            "или переключиться на обычную программу. Чтобы управлять такими окнами, на том ПК "
+            "выйдите из MarinRemote через трей → «Выход», затем запустите MarinRemote от имени "
+            "администратора и подключитесь снова. Запрос UAC подтверждается на том ПК.",
     "secure": "На удалённом ПК открыт защищённый экран (запрос UAC, Ctrl+Alt+Del или блокировка) — "
-              "мышь и клавиатура туда не доходят.",
+              "мышь и клавиатура туда не доходят. Человек у того ПК должен подтвердить запрос "
+              "или разблокировать экран. Запуск от администратора сам по себе доступа к этому экрану не даёт.",
     "self": "Окна MarinRemote на удалённом ПК нельзя нажимать удалённо — это защита от того, "
             "чтобы зритель сам себе что-то разрешил.",
 }
@@ -152,6 +156,14 @@ class SessionWindow(QWidget):
             w.setFocusPolicy(Qt.NoFocus)        # keys stay with the picture (and the remote PC)
             b.addWidget(w)
         lay.addWidget(self.bar)
+        # Input restrictions last until the host says they are gone. A transfer/rights notice
+        # must not replace them and let its timer hide the reason the PC stopped responding.
+        self.input_warning = note("", "Warning")
+        self.input_warning.text.setTextFormat(Qt.PlainText)
+        self.input_warning.layout().setContentsMargins(14, 7, 14, 7)
+        self.input_warning.setStyleSheet("#Warning { border-radius: 0; }")
+        self.input_warning.hide()
+        lay.addWidget(self.input_warning)
         self.warn = note("", "Warning")
         self.warn.layout().setContentsMargins(14, 7, 14, 7)
         self.warn.setStyleSheet("#Warning { border-radius: 0; }")
@@ -254,6 +266,8 @@ class SessionWindow(QWidget):
         self.monitor_box.setVisible(watching and self.monitor_box.count() > 1)
         if st != "connected":
             self.warn.hide()
+        if st != "connected" or "control" not in session.rights:
+            self.input_warning.hide()
         self._apply_control()
         self.big.setText(STATE_TEXT.get(st, st))
         self.info.hide()
@@ -317,13 +331,14 @@ class SessionWindow(QWidget):
                 self.board.set_text(text)
         elif t == "warn":
             code = msg.get("code")
-            text = WARNINGS.get(code)
-            if text:
+            if code in ("uipi", "secure"):
                 app = msg.get("app") or ""
-                self.warn.text.setText(text.format(app=f" ({app})" if app else ""))
-            self.warn.setVisible(bool(text))
-            if code == "self":                       # a moment's notice, not a state
-                QTimer.singleShot(4000, self._hide_self_warning)
+                self.input_warning.text.setText(WARNINGS[code].format(app=f" ({app})" if app else ""))
+                self.input_warning.show()
+            elif code is None:
+                self.input_warning.hide()
+            elif code == "self":
+                self._note(WARNINGS["self"])
         elif t == "clock":
             self._got_clock(msg)
         elif t == "rights":
@@ -471,7 +486,7 @@ class SessionWindow(QWidget):
     def _note(self, text):
         self.warn.text.setText(text)
         self.warn.show()
-        QTimer.singleShot(5000, lambda: self.warn.text.text() == text and self.warn.hide())
+        QTimer.singleShot(5000, self, lambda: self.warn.text.text() == text and self.warn.hide())
 
     def _power(self, action):
         title, text = POWER_ASK[action]
@@ -483,10 +498,6 @@ class SessionWindow(QWidget):
         s = self.session
         if box.clickedButton() is ok and s is not None and s.state == "connected" and "control" in s.rights:
             s.post({"t": "power", "action": action})
-
-    def _hide_self_warning(self):
-        if self.warn.text.text() == WARNINGS["self"]:
-            self.warn.hide()
 
     def eventFilter(self, obj, e):
         if (obj is self.video and e.type() == QEvent.KeyPress and e.key() in (Qt.Key_Return, Qt.Key_Enter)

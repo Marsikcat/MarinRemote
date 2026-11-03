@@ -309,3 +309,41 @@ def test_file_manager_says_where_other_folders_are_opened(app):
             assert not fm.remote_hint.isHidden() and "Все диски этого ПК" in fm.remote_hint.text()
             assert says in fm.remote_hint.text()
         fm.close()
+
+
+def test_uipi_warning_survives_other_notices_and_clears_when_host_recovers(app, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from marinremote.ui.session_window import SessionWindow
+
+    # Keep the real Qt window and message handlers, with no keyboard hook, capture or network.
+    monkeypatch.setattr(SessionWindow, "_start", lambda self, password=None: None)
+    monkeypatch.setattr(SessionWindow, "_tick", lambda self: None)
+    win = SessionWindow(Settings(tmp_path), None, {"id": "ab" * 32}, ["view", "control"])
+    session = SimpleNamespace(state="connected", rights=["view", "control"], host={},
+                              remembered=None, detail={}, stop=lambda: None)
+    win.session = session
+    win.timer.stop()
+    try:
+        win._on_message(session, {"t": "warn", "code": "uipi", "app": "Taskmgr.exe"})
+        assert not win.input_warning.isHidden()
+        assert "Taskmgr.exe" in win.input_warning.text.text()
+        assert "от имени администратора" in win.input_warning.text.text()
+        assert "Выход" in win.input_warning.text.text()
+
+        win._note("Файл отправлен")
+        win.warn.hide()                   # the transient notice's timer expires
+        assert not win.input_warning.isHidden()
+        win._on_message(session, {"t": "warn", "code": "self"})
+        win.warn.hide()
+        assert not win.input_warning.isHidden()
+
+        win._on_message(session, {"t": "warn", "code": None, "app": ""})
+        assert win.input_warning.isHidden()
+        win._on_message(session, {"t": "warn", "code": "secure", "app": ""})
+        assert not win.input_warning.isHidden()
+        assert "не даёт" in win.input_warning.text.text()
+        session.state = "closed"
+        win._on_state(session)
+        assert win.input_warning.isHidden()
+    finally:
+        win.close()
