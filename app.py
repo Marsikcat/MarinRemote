@@ -90,6 +90,11 @@ def main():
     # hands over the link it was opened with
     link = link_arg(args)
     key = f"{APP_NAME}-{os.environ.get('USERNAME', 'user')}-{INSTANCE}"
+    if os.environ.get("MARINREMOTE_DATA"):
+        # An explicitly separate profile must not hand off to the user's real running copy.
+        import hashlib
+        profile = os.path.normcase(str(DATA.resolve())).encode("utf-8")
+        key += "-" + hashlib.sha256(profile).hexdigest()[:16]
     sock = QLocalSocket()
     sock.connectToServer(key)
     if sock.waitForConnected(300):
@@ -181,6 +186,26 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--input-service" in sys.argv[1:]:
+        from marinremote.service.runtime import run
+        run()
+        sys.exit(0)
+    if len(sys.argv) == 4 and sys.argv[1] == "--input-agent":
+        from marinremote.service.agent import run
+        try:
+            run(sys.argv[2], int(sys.argv[3]))
+        except Exception:
+            # A vanished pipe is normal at session end; don't leave a frozen-helper error dialog.
+            sys.exit(1)
+        sys.exit(0)
+    if len(sys.argv) == 2 and sys.argv[1] in ("--install-input-service", "--remove-input-service"):
+        from marinremote.service.runtime import install, remove
+        try:
+            (install if sys.argv[1] == "--install-input-service" else remove)()
+        except Exception as exc:
+            _message(f"Служба ввода MarinRemote: {exc}")
+            sys.exit(1)
+        sys.exit(0)
     if len(sys.argv) > 2 and sys.argv[1] == "--encoder":
         # the screen encoder: a separate process of this same program, no window, no Qt
         from marinremote.host import encoder

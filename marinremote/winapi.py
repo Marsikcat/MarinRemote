@@ -255,7 +255,7 @@ def secure_desktop():
         buf = ctypes.create_unicode_buffer(64)
         need = wt.DWORD()
         if not user32.GetUserObjectInformationW(h, 2, buf, ctypes.sizeof(buf), ctypes.byref(need)):   # UOI_NAME
-            return False
+            return True                 # if the desktop can't be identified, don't inject into it
         return buf.value.lower() != "default"
     finally:
         user32.CloseDesktop(h)

@@ -93,7 +93,7 @@ class Injector:
 
     def _go(self, *inputs):
         arr = (_INPUT * len(inputs))(*inputs)
-        self._send(len(inputs), arr, ctypes.sizeof(_INPUT))
+        return self._send(len(inputs), arr, ctypes.sizeof(_INPUT))
 
     def mouse(self, px, py, flags=0, data=0, move=True):
         """A move to (px, py) and/or button/wheel flags in one event."""

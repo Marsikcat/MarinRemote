@@ -24,6 +24,11 @@ for pkg in ("iroh", "av", "nacl"):
     hiddenimports += h
 # PyNaCl's libsodium binding is a cffi module: it needs _cffi_backend, which nothing imports visibly
 hiddenimports += ["_cffi_backend"]
+# pywin32 has no importable "pywin32" package to collect_all. Its standard hooks collect
+# the extension modules and pywintypes/pythoncom DLLs; include the service's dynamic imports.
+hiddenimports += ["win32timezone", "servicemanager", "win32serviceutil", "win32service",
+                  "win32event", "win32pipe", "win32file", "win32security", "win32process",
+                  "win32con", "win32profile", "pywintypes"]
 
 # Qt modules we never import, to keep the download small
 EXCLUDE_QT = ["PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets", "PySide6.QtPdf",

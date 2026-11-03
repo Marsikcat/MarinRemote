@@ -217,7 +217,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(c)
 
         if not is_elevated():
-            lay.addWidget(note("MarinRemote работает с правами обычного пользователя. Если на переднем плане "
+            lay.addWidget(note("MarinRemote работает с правами обычного пользователя. Без службы ввода, если на переднем плане "
                                "Диспетчер задач или другая программа с повышенными правами, Windows может "
                                "блокировать весь удалённый ввод. Для управления такими окнами выйдите из "
                                "MarinRemote через трей → «Выход» и запустите его от имени администратора. "
@@ -254,8 +254,10 @@ class MainWindow(QMainWindow):
             self.update_label.setText(f"Вышла версия <b>{info['latest']}</b> ({link}). Установлена {VERSION}.")
             self.update_btn.setText(f"Установить {info['latest']}")
         else:
-            self.update_label.setText(f"Вышла версия <b>{info['latest']}</b> ({link}). Эта копия запущена не "
-                                      f"из установленной программы — обновите её сами.")
+            from ..service.client import eligible
+            reason = ("Для этой установки со службой скачайте Admin-установщик со страницы выпуска."
+                      if eligible() else "Эта копия запущена не из установленной программы — обновите её сами.")
+            self.update_label.setText(f"Вышла версия <b>{info['latest']}</b> ({link}). {reason}")
             self.update_btn.setText("Открыть страницу выпуска")
         self.update_btn.setEnabled(True)
         self.update_btn.show()
@@ -869,6 +871,20 @@ class MainWindow(QMainWindow):
         cl.addWidget(switch_row("Закрытие окна сворачивает в трей",
                                 "Иначе закрытие окна выходит из программы и обрывает подключения.",
                                 self.s["close_to_tray"], lambda on: self._set("close_to_tray", on)))
+        lay.addWidget(c)
+
+        c, cl = card()
+        cl.addWidget(label("УПРАВЛЕНИЕ ОКНАМИ АДМИНИСТРАТОРА", "caption"))
+        from ..service.client import status_text
+        self.input_service_label = label(status_text(), wrap=True)
+        cl.addWidget(self.input_service_label)
+        cl.addWidget(label("Установка Admin добавляет службу Windows один раз с подтверждением "
+                           "администратора. Приложение и автозапуск затем работают как обычно; "
+                           "служба помогает вводить мышь и клавиши в Диспетчер задач и другие "
+                           "окна администратора. Требуется вход в учётную запись администратора. "
+                           "Экран входа, блокировки и защищённый запрос UAC пока недоступны.", "hint", wrap=True))
+        cl.addWidget(hbox(button("Проверить службу", "small",
+                                lambda: self.input_service_label.setText(status_text())), None))
         lay.addWidget(c)
 
         c, cl = card()

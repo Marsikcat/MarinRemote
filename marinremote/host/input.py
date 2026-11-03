@@ -27,11 +27,11 @@ class InputService(Service):
         self.core, self.net = core, core.net
         self.video = video                # whose monitor a session's coordinates are relative to
         if injector is None:
-            from .inject import Injector
-            injector = Injector()
+            from ..service.client import ServiceInjector
+            injector = ServiceInjector()
         self.inj = injector
         self.monitors_fn = monitors or winapi.monitors
-        self.probe = probe or _probe      # () -> (code, app): what our input can't reach right now
+        self.probe = probe or (lambda: _probe(getattr(self.inj, "service_active", lambda: False)()))
         self.states = {}                  # sid -> InputState
         self.sessions = {}
         self.warned = {}                  # sid -> the last warning sent
@@ -64,6 +64,9 @@ class InputService(Service):
         if not self.states and self._guard is not None:
             self._guard.cancel()
             self._guard = None
+            close = getattr(self.inj, "close_service", None)
+            if close:
+                close()
 
     def on_datagram(self, s, data):
         if data[0] != P.DG_MOUSE:
@@ -126,10 +129,10 @@ class InputService(Service):
             await asyncio.sleep(GUARD_EVERY)
 
 
-def _probe():
+def _probe(service_active=False):
     if winapi.secure_desktop():
         return "secure", ""
     pid = winapi.foreground_pid()
-    if winapi.above_us(pid):
+    if not service_active and winapi.above_us(pid):
         return "uipi", winapi.process_name(pid)
     return None, ""

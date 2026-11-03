@@ -29,7 +29,9 @@ jobs:
           }
       - name: Build
         run: python tools/build.py
+      - name: Admin installer
+        run: python -c "import sys; sys.path.insert(0, 'tools'); import build; build.installer(build.version(), admin=True)"
       - uses: actions/upload-artifact@v4
         with:
           name: MarinRemote-Setup
-          path: dist/MarinRemote-Setup-*.exe
+          path: dist/*Setup-*.exe

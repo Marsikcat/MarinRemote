@@ -37,7 +37,12 @@ def asset_name(version):
 
 def can_install():
     """Only an installed build replaces itself — never `python app.py` or a test copy."""
-    return FROZEN and not INSTANCE
+    if not FROZEN or INSTANCE:
+        return False
+    # The existing release updater only knows per-user installers. It must not replace a
+    # protected service installation with a per-user copy and leave a stale privileged binary.
+    from .service.client import eligible
+    return not eligible()
 
 
 def _get(url, timeout=15, accept=None):

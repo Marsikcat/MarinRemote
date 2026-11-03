@@ -86,3 +86,13 @@ def test_a_copy_from_the_sources_never_runs_an_installer(monkeypatch, tmp_path, 
     monkeypatch.setattr(updater, "can_install", lambda: True)
     (tmp_path / "MarinRemote-update" / "MarinRemote-Setup-9.9.9.exe").write_bytes(b"swapped")   # waited, got replaced
     assert updater.install() is False and ran == []
+
+
+def test_admin_copy_is_never_replaced_with_a_per_user_installer(monkeypatch):
+    from marinremote.service import client
+    monkeypatch.setattr(updater, "FROZEN", True)
+    monkeypatch.setattr(updater, "INSTANCE", 0)
+    monkeypatch.setattr(client, "eligible", lambda: True)
+    assert not updater.can_install()
+    monkeypatch.setattr(client, "eligible", lambda: False)
+    assert updater.can_install()

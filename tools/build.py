@@ -3,12 +3,15 @@
 Build the Windows app and its installer.
 
     python tools\\build.py      (inside the venv with requirements.txt + pyinstaller)
+    python tools\\build.py --admin   (optional SYSTEM input service, requires admin to install)
 
 Result:
     dist\\MarinRemote\\                  MarinRemote.exe, _internal\\
     dist\\MarinRemote-Setup-X.Y.Z.exe    installer (Inno Setup 6), per-user, no admin rights
+    dist\\MarinRemote-Admin-Setup-X.Y.Z.exe   with --admin, protected Program Files install
 """
 
+import argparse
 import os
 import shutil
 import subprocess
@@ -55,11 +58,18 @@ def icon():
         subprocess.run([sys.executable, str(ROOT / "tools" / "make_icon.py")], check=True, cwd=ROOT)
 
 
-def pyinstaller():
+def pyinstaller(clean=True):
+    env = dict(os.environ)
+    # Developer tools (e.g. Poppler) may put incompatible ICU/Qt DLLs on PATH. Resolve system
+    # dependencies against Windows and this Python installation, not unrelated applications.
+    windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    env["PATH"] = os.pathsep.join(map(str, (Path(sys.executable).parent, Path(sys.base_prefix),
+                                           windows / "System32", windows)))
+    env.pop("PYTHONPATH", None)
     subprocess.run([sys.executable, "-m", "PyInstaller", str(ROOT / "packaging" / "MarinRemote.spec"),
-                    "--noconfirm", "--clean", "--log-level", "WARN",
+                    "--noconfirm", *(["--clean"] if clean else []), "--log-level", "WARN",
                     "--distpath", str(DIST), "--workpath", str(BUILD / "pyinstaller")],
-                   check=True, cwd=ROOT)
+                   check=True, cwd=ROOT, env=env)
 
 
 def find_iscc():
@@ -72,13 +82,16 @@ def find_iscc():
     return shutil.which("ISCC")
 
 
-def installer(ver):
+def installer(ver, admin=False):
     iscc = find_iscc()
     if not iscc:
         sys.exit("Не найден Inno Setup 6. Установите: winget install JRSoftware.InnoSetup")
-    subprocess.run([str(iscc), "/Q", f"/DAppVersion={ver}", str(ROOT / "packaging" / "installer.iss")],
-                   check=True, cwd=ROOT / "packaging")
-    return DIST / f"MarinRemote-Setup-{ver}.exe"
+    cmd = [str(iscc), "/Q", f"/DAppVersion={ver}"]
+    if admin:
+        cmd.append("/DAdminInstall")
+    subprocess.run(cmd + [str(ROOT / "packaging" / "installer.iss")], check=True, cwd=ROOT / "packaging")
+    variant = "Admin-" if admin else ""
+    return DIST / f"MarinRemote-{variant}Setup-{ver}.exe"
 
 
 def size_mb(path):
@@ -88,13 +101,17 @@ def size_mb(path):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Build MarinRemote and its Windows installer")
+    parser.add_argument("--admin", action="store_true",
+                        help="build the Program Files installer with the optional SYSTEM input service")
+    args = parser.parse_args()
     ver = version()
     print(f"MarinRemote {ver}: сборка exe…")
     write_version_info(ver)
     icon()
     pyinstaller()
     print("Установщик…")
-    setup = installer(ver)
+    setup = installer(ver, admin=args.admin)
     print(f"\nГотово:\n  {APP_DIR}  ({size_mb(APP_DIR):.0f} МБ)\n  {setup}  ({size_mb(setup):.0f} МБ)")
 
 
