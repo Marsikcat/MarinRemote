@@ -1,7 +1,6 @@
 ; Installer for MarinRemote (Inno Setup 6). Built by tools\build.py:
 ;   ISCC /DAppVersion=X.Y.Z packaging\installer.iss
-; Per-user install, no administrator rights: %LOCALAPPDATA%\Programs\MarinRemote.
-; Add /DAdminInstall for the optional SYSTEM input service in protected Program Files.
+; One installation in protected Program Files, including the Windows input service.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -10,11 +9,8 @@
 #define AppExe "MarinRemote.exe"
 
 [Setup]
-#ifdef AdminInstall
+; Keep the identity of the former Admin installer so those copies upgrade in place.
 AppId=MarinRemote.Admin
-#else
-AppId={{1A26400A-4E9A-45F7-AB10-B052620B8E40}
-#endif
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
@@ -24,21 +20,13 @@ AppSupportURL=https://github.com/Marsikcat/MarinRemote/issues
 AppUpdatesURL=https://github.com/Marsikcat/MarinRemote/releases
 VersionInfoVersion={#AppVersion}
 VersionInfoDescription={#AppName} — установщик
-#ifdef AdminInstall
 ; Do not inherit a per-user path or allow /DIR to put a SYSTEM binary in a writable folder.
 DefaultDirName={commonpf64}\{#AppName}
 UsePreviousAppDir=no
 DisableDirPage=yes
 PrivilegesRequired=admin
-OutputBaseFilename=MarinRemote-Admin-Setup-{#AppVersion}
-UninstallDisplayName={#AppName} (Admin)
-#else
-DefaultDirName={localappdata}\Programs\{#AppName}
-DisableDirPage=auto
-PrivilegesRequired=lowest
 OutputBaseFilename=MarinRemote-Setup-{#AppVersion}
 UninstallDisplayName={#AppName}
-#endif
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
@@ -83,20 +71,16 @@ Root: HKCU; Subkey: "Software\Classes\marinremote\shell\open\command"; ValueType
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent; Check: ShouldLaunchApp
 ; a silent run is the in-app update: start the new version right away
-#ifdef AdminInstall
 Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser; Check: ShouldLaunchSilentApp
-#else
-Filename: "{app}\{#AppExe}"; Flags: nowait; Check: ShouldLaunchSilentApp
-#endif
 
 [UninstallRun]
-; Session 0 belongs to services: even an elevated per-user uninstaller must leave those alone.
+; Session 0 belongs to services and is stopped separately before uninstalling.
 Filename: "{sys}\taskkill.exe"; Parameters: "/f /im {#AppExe} /fi ""SESSION ne 0"""; Flags: runhidden; RunOnceId: "StopApp"
 
 [Code]
-#ifdef AdminInstall
 const
   InputServiceName = 'MarinRemoteInput';
+  LegacyUserKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{1A26400A-4E9A-45F7-AB10-B052620B8E40}_is1';
   SC_MANAGER_CONNECT = $0001;
   SERVICE_QUERY_STATUS = $0004;
   SERVICE_STOPPED = 1;
@@ -207,9 +191,18 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
+  // Never run an old uninstaller from a user-writable folder with elevated rights.
+  // Its data folder is outside the installation and survives the normal uninstall.
+  if RegKeyExists(HKCU, LegacyUserKey) then begin
+    Result := 'На этом ПК установлена прежняя версия MarinRemote для одного пользователя. ' +
+      'Закройте MarinRemote через трей → «Выход», удалите прежнюю версию в ' +
+      '«Параметры Windows → Приложения» и запустите этот установщик снова. ' +
+      'Ключ устройства, контакты и настройки сохранятся.';
+    Exit;
+  end;
   if CompareText(RemoveBackslash(ExpandFileName(ExpandConstant('{app}'))),
       ExpandConstant('{commonpf64}\{#AppName}')) <> 0 then begin
-    Result := 'Admin-версия должна быть установлена в ' +
+    Result := 'MarinRemote должен быть установлен в ' +
       ExpandConstant('{commonpf64}\{#AppName}') + '.';
     Exit;
   end;
@@ -260,7 +253,6 @@ begin
   RaiseException('Не удалось удалить ' + InputServiceName +
     ' за 60 секунд. Файлы сохранены; закройте оснастку служб или перезагрузите ПК и повторите удаление.');
 end;
-#endif
 
 function ShouldLaunchApp: Boolean;
 var

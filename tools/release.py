@@ -72,14 +72,10 @@ def main():
     if args.dry_run:
         return
 
-    installers = [installer]
-    admin = installer.with_name(f"MarinRemote-Admin-Setup-{version}.exe")
-    if admin.exists():
-        installers.append(admin)
-    signatures = sign.sign_files(installers, key)
+    signatures = sign.sign_files([installer], key)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as f:
         f.write(notes)
-    cmd = ["gh", "release", "create", tag, *map(str, installers + signatures), "--repo", REPO, "--target", sha,
+    cmd = ["gh", "release", "create", tag, *map(str, [installer] + signatures), "--repo", REPO, "--target", sha,
            "--title", f"MarinRemote {version}", "--notes-file", f.name]
     if args.draft:
         cmd.append("--draft")

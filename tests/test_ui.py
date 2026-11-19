@@ -311,6 +311,26 @@ def test_file_manager_says_where_other_folders_are_opened(app):
         fm.close()
 
 
+def test_cancelled_update_keeps_the_application_and_retry_available(window, monkeypatch):
+    from marinremote.ui import mainwindow
+
+    win, _, _, _ = window
+    monkeypatch.setattr(mainwindow.updater, "can_install", lambda: True)
+    monkeypatch.setattr(mainwindow.updater, "download", lambda *a: "9.9.9")
+    def cancelled():
+        raise RuntimeError("Windows: запрос администратора отменён")
+    monkeypatch.setattr(mainwindow.updater, "install", cancelled)
+    monkeypatch.setattr(mainwindow, "in_thread", lambda work, done: done(work()))
+    win._show_update({"available": True, "latest": "9.9.9", "url": "https://example/release"}, False)
+    scheduled = []
+    with monkeypatch.context() as patch:
+        patch.setattr(mainwindow.QTimer, "singleShot", lambda *a: scheduled.append(a))
+        win._install_update()
+    assert not scheduled and win.isVisible()
+    assert win.update_btn.isEnabled() and win.update_check_btn.isEnabled()
+    assert "отменён" in win.update_label.text()
+
+
 def test_uipi_warning_survives_other_notices_and_clears_when_host_recovers(app, tmp_path, monkeypatch):
     from types import SimpleNamespace
     from marinremote.ui.session_window import SessionWindow

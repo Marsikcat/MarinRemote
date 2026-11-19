@@ -3,12 +3,10 @@
 Build the Windows app and its installer.
 
     python tools\\build.py      (inside the venv with requirements.txt + pyinstaller)
-    python tools\\build.py --admin   (optional SYSTEM input service, requires admin to install)
 
 Result:
     dist\\MarinRemote\\                  MarinRemote.exe, _internal\\
-    dist\\MarinRemote-Setup-X.Y.Z.exe    installer (Inno Setup 6), per-user, no admin rights
-    dist\\MarinRemote-Admin-Setup-X.Y.Z.exe   with --admin, protected Program Files install
+    dist\\MarinRemote-Setup-X.Y.Z.exe    installer with input service (Inno Setup 6)
 """
 
 import argparse
@@ -82,16 +80,13 @@ def find_iscc():
     return shutil.which("ISCC")
 
 
-def installer(ver, admin=False):
+def installer(ver):
     iscc = find_iscc()
     if not iscc:
         sys.exit("Не найден Inno Setup 6. Установите: winget install JRSoftware.InnoSetup")
     cmd = [str(iscc), "/Q", f"/DAppVersion={ver}"]
-    if admin:
-        cmd.append("/DAdminInstall")
     subprocess.run(cmd + [str(ROOT / "packaging" / "installer.iss")], check=True, cwd=ROOT / "packaging")
-    variant = "Admin-" if admin else ""
-    return DIST / f"MarinRemote-{variant}Setup-{ver}.exe"
+    return DIST / f"MarinRemote-Setup-{ver}.exe"
 
 
 def size_mb(path):
@@ -102,16 +97,14 @@ def size_mb(path):
 
 def main():
     parser = argparse.ArgumentParser(description="Build MarinRemote and its Windows installer")
-    parser.add_argument("--admin", action="store_true",
-                        help="build the Program Files installer with the optional SYSTEM input service")
-    args = parser.parse_args()
+    parser.parse_args()
     ver = version()
     print(f"MarinRemote {ver}: сборка exe…")
     write_version_info(ver)
     icon()
     pyinstaller()
     print("Установщик…")
-    setup = installer(ver, admin=args.admin)
+    setup = installer(ver)
     print(f"\nГотово:\n  {APP_DIR}  ({size_mb(APP_DIR):.0f} МБ)\n  {setup}  ({size_mb(setup):.0f} МБ)")
 
 

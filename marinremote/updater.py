@@ -39,10 +39,10 @@ def can_install():
     """Only an installed build replaces itself — never `python app.py` or a test copy."""
     if not FROZEN or INSTANCE:
         return False
-    # The existing release updater only knows per-user installers. It must not replace a
-    # protected service installation with a per-user copy and leave a stale privileged binary.
+    # The single installer updates the protected installation and its input service.
+    # Developer, portable and old per-user copies must migrate via the installer first.
     from .service.client import eligible
-    return not eligible()
+    return eligible()
 
 
 def _get(url, timeout=15, accept=None):
@@ -147,6 +147,21 @@ def install():
             return False
     except OSError:
         return False
-    subprocess.Popen([str(path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"],
-                     creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+    _launch_installer(path)
     return True
+
+
+def _launch_installer(path):
+    """Ask Windows for elevation; cancel/failure must leave the running app open."""
+    import ctypes
+    from ctypes import wintypes
+
+    execute = ctypes.WinDLL("shell32", use_last_error=True).ShellExecuteW
+    execute.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                        wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int]
+    execute.restype = ctypes.c_void_p
+    args = subprocess.list2cmdline(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"])
+    result = execute(None, "runas", str(path), args, str(path.parent), 1)
+    if not result or result <= 32:
+        raise RuntimeError("Windows не разрешила запуск установщика. "
+                           "Подтвердите запрос администратора и повторите обновление.")

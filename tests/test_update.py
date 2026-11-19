@@ -81,18 +81,56 @@ def test_a_copy_from_the_sources_never_runs_an_installer(monkeypatch, tmp_path, 
     fake_github(monkeypatch, tmp_path, data, signing.sign(key, "MarinRemote-Setup-9.9.9.exe", signing.digest(data)))
     updater.download({"latest": "9.9.9", "download": "u", "signature": "s", "size": 0})
     ran = []
-    monkeypatch.setattr(updater.subprocess, "Popen", lambda *a, **kw: ran.append(a))
+    monkeypatch.setattr(updater, "_launch_installer", lambda path: ran.append(path))
     assert not updater.can_install() and updater.install() is False and ran == []
     monkeypatch.setattr(updater, "can_install", lambda: True)
     (tmp_path / "MarinRemote-update" / "MarinRemote-Setup-9.9.9.exe").write_bytes(b"swapped")   # waited, got replaced
     assert updater.install() is False and ran == []
 
 
-def test_admin_copy_is_never_replaced_with_a_per_user_installer(monkeypatch):
+def test_only_the_protected_installation_can_update_itself(monkeypatch):
     from marinremote.service import client
     monkeypatch.setattr(updater, "FROZEN", True)
     monkeypatch.setattr(updater, "INSTANCE", 0)
     monkeypatch.setattr(client, "eligible", lambda: True)
-    assert not updater.can_install()
-    monkeypatch.setattr(client, "eligible", lambda: False)
     assert updater.can_install()
+    monkeypatch.setattr(client, "eligible", lambda: False)
+    assert not updater.can_install()
+    monkeypatch.setattr(client, "eligible", lambda: True)
+    monkeypatch.setattr(updater, "INSTANCE", 1)
+    assert not updater.can_install()
+    monkeypatch.setattr(updater, "INSTANCE", 0)
+    monkeypatch.setattr(updater, "FROZEN", False)
+    assert not updater.can_install()
+
+
+@pytest.mark.parametrize("result", [33, 0x100000000, 5, 0, None])
+def test_installer_requests_elevation_and_rejects_cancelled_launch(monkeypatch, tmp_path, result):
+    import ctypes
+    from types import SimpleNamespace
+
+    calls = []
+    def execute(*args):
+        calls.append(args)
+        return result
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **kw: SimpleNamespace(ShellExecuteW=execute))
+    installer = tmp_path / "MarinRemote-Setup-9.9.9.exe"
+    if result and result > 32:
+        updater._launch_installer(installer)
+    else:
+        with pytest.raises(RuntimeError, match="Windows"):
+            updater._launch_installer(installer)
+    assert calls == [(None, "runas", str(installer),
+                      "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS", str(tmp_path), 1)]
+
+
+def test_verified_update_is_handed_to_elevation_once(monkeypatch, tmp_path, key):
+    data = b"MZ installer"
+    sig = signing.sign(key, "MarinRemote-Setup-9.9.9.exe", signing.digest(data))
+    fake_github(monkeypatch, tmp_path, data, sig)
+    updater.download({"latest": "9.9.9", "download": "u", "signature": "s", "size": 0})
+    monkeypatch.setattr(updater, "can_install", lambda: True)
+    ran = []
+    monkeypatch.setattr(updater, "_launch_installer", lambda path: ran.append(path))
+    assert updater.install()
+    assert ran == [tmp_path / "MarinRemote-update" / "MarinRemote-Setup-9.9.9.exe"]

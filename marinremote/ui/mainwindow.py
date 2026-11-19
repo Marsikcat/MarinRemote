@@ -219,8 +219,8 @@ class MainWindow(QMainWindow):
         if not is_elevated():
             lay.addWidget(note("MarinRemote работает с правами обычного пользователя. Без службы ввода, если на переднем плане "
                                "Диспетчер задач или другая программа с повышенными правами, Windows может "
-                               "блокировать весь удалённый ввод. Для управления такими окнами выйдите из "
-                               "MarinRemote через трей → «Выход» и запустите его от имени администратора. "
+                               "блокировать весь удалённый ввод. Для управления такими окнами установите "
+                               "MarinRemote со службой ввода и запускайте программу из Program Files. "
                                "Запрос UAC и экран входа в этой версии всё равно недоступны."))
         lay.addStretch(1)
         return area
@@ -251,13 +251,12 @@ class MainWindow(QMainWindow):
             return
         link = f"<a href='{info['url']}'>что нового</a>"
         if updater.can_install():
-            self.update_label.setText(f"Вышла версия <b>{info['latest']}</b> ({link}). Установлена {VERSION}.")
+            self.update_label.setText(f"Вышла версия <b>{info['latest']}</b> ({link}). Установлена {VERSION}. "
+                                      "При установке Windows попросит подтверждение администратора.")
             self.update_btn.setText(f"Установить {info['latest']}")
         else:
-            from ..service.client import eligible
-            reason = ("Для этой установки со службой скачайте Admin-установщик со страницы выпуска."
-                      if eligible() else "Эта копия запущена не из установленной программы — обновите её сами.")
-            self.update_label.setText(f"Вышла версия <b>{info['latest']}</b> ({link}). {reason}")
+            self.update_label.setText(f"Вышла версия <b>{info['latest']}</b> ({link}). "
+                                      "Скачайте единый установщик со страницы выпуска.")
             self.update_btn.setText("Открыть страницу выпуска")
         self.update_btn.setEnabled(True)
         self.update_btn.show()
@@ -294,12 +293,20 @@ class MainWindow(QMainWindow):
                 self.update_btn.setEnabled(True)
                 self.update_check_btn.setEnabled(True)
                 return
-            self.update_label.setText("Подпись проверена. Устанавливаем — MarinRemote перезапустится…")
-            if updater.install():
+            self.update_label.setText("Подпись проверена. Подтвердите запрос администратора Windows…")
+            try:
+                started = updater.install()
+            except (OSError, RuntimeError) as exc:
+                self.update_label.setText(f"Обновление не установлено: {exc}")
+                self.update_btn.setEnabled(True)
+                self.update_check_btn.setEnabled(True)
+                return
+            if started:
                 QTimer.singleShot(300, QApplication.quit)
             else:
                 self.update_label.setText("Скачанный установщик изменился, пока ждал, — установка отменена.")
                 self.update_btn.setEnabled(True)
+                self.update_check_btn.setEnabled(True)
         self._progress = progress
         in_thread(fetch, done)
 
@@ -878,7 +885,7 @@ class MainWindow(QMainWindow):
         from ..service.client import status_text
         self.input_service_label = label(status_text(), wrap=True)
         cl.addWidget(self.input_service_label)
-        cl.addWidget(label("Установка Admin добавляет службу Windows один раз с подтверждением "
+        cl.addWidget(label("Установщик MarinRemote добавляет службу Windows с подтверждением "
                            "администратора. Приложение и автозапуск затем работают как обычно; "
                            "служба помогает вводить мышь и клавиши в Диспетчер задач и другие "
                            "окна администратора. Требуется вход в учётную запись администратора. "
